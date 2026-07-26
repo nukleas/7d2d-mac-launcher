@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>7D2D Mac Launcher</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Clean-room · macOS first</p>
+          <h1>7D2D Mac Launcher</h1>
+          <p class="lede">
+            Install overhauls <strong>in place</strong> on your Steam copy — no full-game clone,
+            no broken <code>~</code> paths, no update restart loop.
+          </p>
+        </div>
+        <div class="badge-col" id="disk-badge">Disk…</div>
+      </header>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Steam game</h2>
+          <button type="button" class="ghost" id="btn-refresh">Refresh</button>
+        </div>
+        <label class="field">
+          <span>Game folder (optional override)</span>
+          <input
+            id="game-path"
+            type="text"
+            placeholder="~/Library/Application Support/Steam/steamapps/common/7 Days To Die"
+          />
+        </label>
+        <div id="game-status" class="status muted">Detecting…</div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Undead Legacy Experimental</h2>
+          <span class="pill">A20.7 · in-place</span>
+        </div>
+        <p class="hint">
+          Downloads the official UL package and copies <code>BepInEx</code> / <code>Mods</code>
+          into your existing Steam install. Requires Steam beta
+          <strong>alpha20.7</strong>. EAC stays off via <code>run_bepinex.sh</code>.
+        </p>
+        <label class="check">
+          <input type="checkbox" id="force-install" />
+          Force install even if version check fails
+        </label>
+        <div class="actions">
+          <button type="button" class="primary" id="btn-install">Install UL Experimental</button>
+          <button type="button" class="secondary" id="btn-launch">Launch UL</button>
+        </div>
+        <pre id="log" class="log" aria-live="polite"></pre>
+      </section>
+
+      <footer class="foot">
+        <p>
+          Not affiliated with SphereII / The7D2DModLauncher. Clean-room reimplementation focused on
+          Mac pain points we hit with V5.
+        </p>
+        <p>
+          UL by Subquake ·
+          <a href="https://ul.subquake.com/download" target="_blank" rel="noreferrer"
+            >ul.subquake.com</a
+          >
+        </p>
+      </footer>
+    </main>
+  </body>
+</html>

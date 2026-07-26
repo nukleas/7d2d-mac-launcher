@@ -1,0 +1,24 @@
+[package]
+name = "seven_days_mac_launcher"
+version = "0.1.0"
+description = "Mac-focused 7 Days to Die mod installer (clean-room, no full-game clone)"
+authors = ["nukleas"]
+edition = "2021"
+
+[lib]
+name = "seven_days_mac_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+thiserror = "2"
+walkdir = "2"
