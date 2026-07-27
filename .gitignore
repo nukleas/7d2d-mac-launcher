@@ -29,6 +29,11 @@ src-tauri/target
 # Release staging (built zips/apps)
 dist-release/
 
+# Local signing secrets (never commit)
+.env.signing
+*.p8
+AuthKey_*.p8
+
 # OS / editor
 *.swp
 *~

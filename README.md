@@ -49,18 +49,23 @@ bun run tauri dev
 # Rust unit tests
 bun run test:rust
 
-# Release .app + .dmg
+# Unsigned / ad-hoc release .app + .dmg
 bun run package
 
-# Friend distribution folder + zip (Open Me First + guide)
+# Friend zip (Open Me First + guide) — ad-hoc, may hit Sequoia Gatekeeper
 bun run release-zip
+
+# Developer ID sign + notarize + staple + friend zip (recommended)
+# One-time: see docs/SIGNING.md  →  then:
+bun run release:signed
 ```
 
 Artifacts:
 
 - App/DMG: `src-tauri/target/release/bundle/`  
-- Zip (after `release-zip`): `dist-release/UndeadLegacy-Mac-Setup.zip`  
+- Zip: `dist-release/UndeadLegacy-Mac-Setup.zip`  
 
+Signing details: [docs/SIGNING.md](./docs/SIGNING.md).
 ## Architecture (short)
 
 | Layer | Role |
