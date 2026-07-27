@@ -18,7 +18,11 @@ pub struct GameInfo {
     pub looks_like_a20: bool,
     pub has_bepinex: bool,
     pub has_run_bepinex: bool,
+    /// Unity Doorstop dylibs required for Mac launch (`doorstop_libs/libdoorstop_*.dylib`).
+    pub has_doorstop: bool,
     pub has_mods_folder: bool,
+    /// True when BepInEx + doorstop + launch script + Mods are all present.
+    pub mod_ready: bool,
     pub notes: Vec<String>,
 }
 
@@ -63,12 +67,29 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
 
     let has_bepinex = game_path.join("BepInEx").is_dir();
     let has_run_bepinex = game_path.join("run_bepinex.sh").is_file();
+    let has_doorstop = game_path
+        .join("doorstop_libs")
+        .join("libdoorstop_x64.dylib")
+        .is_file()
+        || game_path
+            .join("doorstop_libs")
+            .join("libdoorstop_x86.dylib")
+            .is_file();
     let has_mods_folder = game_path.join("Mods").is_dir()
         || app_path.join("Mods").is_dir()
         || app_path.join("Contents").join("Mods").is_dir();
 
-    if has_bepinex {
-        notes.push("BepInEx is already present in the game folder.".into());
+    // Fully playable: BepInEx + doorstop dylibs + Mods. Shell script optional (launcher injects itself).
+    let mod_ready = has_bepinex && has_doorstop && has_mods_folder;
+
+    if has_bepinex && !has_doorstop {
+        notes.push(
+            "Mod files are incomplete (missing doorstop). Click Install again to repair.".into(),
+        );
+    } else if mod_ready {
+        notes.push("Undead Legacy looks fully installed and ready to play.".into());
+    } else if has_bepinex {
+        notes.push("BepInEx is present in the game folder.".into());
     }
 
     GameInfo {
@@ -82,7 +103,9 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
         looks_like_a20,
         has_bepinex,
         has_run_bepinex,
+        has_doorstop,
         has_mods_folder,
+        mod_ready,
         notes,
     }
 }

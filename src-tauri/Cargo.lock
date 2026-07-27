@@ -3284,9 +3284,10 @@ dependencies = [
 
 [[package]]
 name = "seven_days_mac_launcher"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

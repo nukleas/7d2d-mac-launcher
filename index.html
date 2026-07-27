@@ -1,75 +1,183 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="theme-cyan">
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>7D2D Mac Launcher</title>
+    <title>Undead Legacy Setup</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <main class="shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Clean-room · macOS first</p>
-          <h1>7D2D Mac Launcher</h1>
-          <p class="lede">
-            Install overhauls <strong>in place</strong> on your Steam copy — no full-game clone,
-            no broken <code>~</code> paths, no update restart loop.
-          </p>
+    <div class="scanlines" aria-hidden="true"></div>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <p class="brand-kicker">7 Days to Die · Mac · v0.2.0</p>
+            <h1>Undead Legacy Setup</h1>
+          </div>
         </div>
-        <div class="badge-col" id="disk-badge">Disk…</div>
+        <div class="top-stats">
+          <div class="stat" id="stat-disk">
+            <span class="stat-label">Free space</span>
+            <span class="stat-value">…</span>
+          </div>
+          <div class="stat" id="stat-beta">
+            <span class="stat-label">Steam beta</span>
+            <span class="stat-value">…</span>
+          </div>
+        </div>
       </header>
 
-      <section class="card">
-        <div class="card-head">
-          <h2>Steam game</h2>
-          <button type="button" class="ghost" id="btn-refresh">Refresh</button>
-        </div>
-        <label class="field">
-          <span>Game folder (optional override)</span>
-          <input
-            id="game-path"
-            type="text"
-            placeholder="~/Library/Application Support/Steam/steamapps/common/7 Days To Die"
-          />
-        </label>
-        <div id="game-status" class="status muted">Detecting…</div>
+      <section class="howto panel">
+        <h2 class="howto-title">Do these 4 things (in order)</h2>
+        <ol class="howto-list">
+          <li>
+            <strong>Steam:</strong> right-click <em>7 Days to Die</em> → Properties → Betas → choose
+            <strong>alpha20.7</strong> → wait until Steam finishes updating
+          </li>
+          <li>Open this app — wait for the green light that says the game is ready</li>
+          <li>Press <strong>Install Undead Legacy</strong> and wait (can take several minutes)</li>
+          <li>
+            Press <strong>Play</strong> — use this button every time (don’t use Steam’s Play for the
+            mod)
+          </li>
+        </ol>
       </section>
 
-      <section class="card">
-        <div class="card-head">
-          <h2>Undead Legacy Experimental</h2>
-          <span class="pill">A20.7 · in-place</span>
+      <ol class="steps" id="steps">
+        <li class="step" data-step="1" aria-current="step">
+          <span class="step-num">1</span>
+          <span class="step-label">Check game</span>
+        </li>
+        <li class="step" data-step="2">
+          <span class="step-num">2</span>
+          <span class="step-label">Install mod</span>
+        </li>
+        <li class="step" data-step="3">
+          <span class="step-num">3</span>
+          <span class="step-label">Play</span>
+        </li>
+      </ol>
+
+      <section class="panel glow" id="panel-game">
+        <div class="panel-head">
+          <h2>Your game</h2>
+          <button type="button" class="btn ghost sm" id="btn-refresh">Check again</button>
         </div>
-        <p class="hint">
-          Downloads the official UL package and copies <code>BepInEx</code> / <code>Mods</code>
-          into your existing Steam install. Requires Steam beta
-          <strong>alpha20.7</strong>. EAC stays off via <code>run_bepinex.sh</code>.
+
+        <div class="ready-row" id="ready-banner">
+          <div class="ready-dot" id="ready-dot"></div>
+          <div>
+            <p class="ready-title" id="ready-title">Looking for 7 Days to Die…</p>
+            <p class="ready-sub" id="ready-sub">This only takes a second.</p>
+          </div>
+        </div>
+
+        <div class="chips" id="status-chips"></div>
+
+        <details class="advanced">
+          <summary>Something wrong? Advanced options</summary>
+          <label class="field">
+            <span>Game folder (only if Steam is on another drive)</span>
+            <input
+              id="game-path"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Leave blank — we find Steam automatically"
+            />
+          </label>
+          <p class="field-hint">
+            Most people never need this. Only change it if a friend helped you put Steam somewhere
+            unusual.
+          </p>
+        </details>
+      </section>
+
+      <section class="panel glow" id="panel-install">
+        <div class="panel-head">
+          <h2>Install the mod</h2>
+          <span class="badge badge-cyan">Safe · no second full game</span>
+        </div>
+
+        <p class="panel-copy">
+          This downloads <strong>Undead Legacy</strong> and adds it to the game you already own.
+          It does <strong>not</strong> make a huge second copy of the game.
         </p>
-        <label class="check">
+
+        <ul class="checklist" id="req-list">
+          <li data-req="steam">7 Days to Die installed in Steam</li>
+          <li data-req="beta">Steam beta set to <strong>alpha20.7</strong></li>
+          <li data-req="space">About 2 GB free space (install is smaller; buffer helps)</li>
+        </ul>
+
+        <label class="check advanced-only">
           <input type="checkbox" id="force-install" />
-          Force install even if version check fails
+          Install anyway if the version check fails (only if someone told you to)
         </label>
+
         <div class="actions">
-          <button type="button" class="primary" id="btn-install">Install UL Experimental</button>
-          <button type="button" class="secondary" id="btn-launch">Launch UL</button>
+          <button type="button" class="btn primary lg" id="btn-install">
+            Install Undead Legacy
+          </button>
         </div>
-        <pre id="log" class="log" aria-live="polite"></pre>
+
+        <div class="progress-card" id="progress-card" hidden>
+          <div class="progress-head">
+            <div>
+              <p class="progress-title" id="progress-title">Working…</p>
+              <p class="progress-detail" id="progress-detail">
+                Please leave this window open — don’t force-quit
+              </p>
+            </div>
+            <div class="progress-pct" id="progress-pct">0%</div>
+          </div>
+          <div
+            class="cd-progress cd-progress--thick"
+            id="progress-track"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <div class="cd-progress__bar" id="progress-bar" style="width: 0%"></div>
+          </div>
+          <ol class="stage-list" id="stage-list">
+            <li data-stage="check">Check game</li>
+            <li data-stage="download">Download mod</li>
+            <li data-stage="extract">Unpack files</li>
+            <li data-stage="copy">Install into game</li>
+            <li data-stage="finish">Done</li>
+          </ol>
+        </div>
+
+        <div class="toast" id="result-toast" hidden></div>
+      </section>
+
+      <section class="panel glow" id="panel-play">
+        <div class="panel-head">
+          <h2>Play</h2>
+        </div>
+        <p class="panel-copy">
+          Starts the modded game with Easy Anti-Cheat off and the mod hooked in.
+          <strong>Always use this Play button</strong> — not Steam’s Play.
+        </p>
+        <div class="actions">
+          <button type="button" class="btn secondary lg" id="btn-launch" disabled>
+            Play Undead Legacy
+          </button>
+        </div>
+        <p class="foot-note" id="launch-note"></p>
       </section>
 
       <footer class="foot">
         <p>
-          Not affiliated with SphereII / The7D2DModLauncher. Clean-room reimplementation focused on
-          Mac pain points we hit with V5.
-        </p>
-        <p>
-          UL by Subquake ·
-          <a href="https://ul.subquake.com/download" target="_blank" rel="noreferrer"
-            >ul.subquake.com</a
-          >
+          Made for friends who just want to play · Undead Legacy by Subquake · Not affiliated with
+          The Fun Pimps
         </p>
       </footer>
-    </main>
+    </div>
   </body>
 </html>

@@ -26,3 +26,11 @@ dist-ssr
 # Rust
 src-tauri/target
 
+# Release staging (built zips/apps)
+dist-release/
+
+# OS / editor
+*.swp
+*~
+.DS_Store
+

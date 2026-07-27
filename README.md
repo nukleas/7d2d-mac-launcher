@@ -1,62 +1,87 @@
 # 7D2D Mac Launcher
 
-Clean-room, **macOS-first** installer/launcher for *7 Days to Die* overhauls.
+Clean-room, **macOS-first** installer for *7 Days to Die* overhauls — starting with **Undead Legacy Experimental**.
 
-This is **not** a fork of SphereII’s Unity ModLauncher V5 — that source is not public. It is a new open-source project that fixes the Mac problems we hit with V5:
+Built for people who just want to play (and for friends who should never have to open Terminal).
 
-| V5 pain on Mac | This project |
-|----------------|--------------|
-| Saves `~/…` literally → fake `~` folders | Always expands `~` / `$HOME` to absolute paths |
-| Self-update loop (DMG tag ≠ bundle version) | No self-updater in v0.1 |
-| Defaults to cloning a full game (~14GB+) | **In-place** install into Steam by default |
-| Windows-oriented tooling (7-Zip portable, etc.) | Native `df`, `open`, Terminal + `run_bepinex.sh` |
-| Hard to reason about partial installs | Explicit UL Experimental flow first |
+> **Not a fork of SphereII ModLauncher V5.** That Unity source is not public. This reimplements the Mac workflows we needed after hitting V5 path bugs, update loops, full-game clones, and broken launches on Sequoia.
 
-## Status (v0.1)
+## Why this exists
+
+| Problem with V5 on Mac | What we do |
+|------------------------|------------|
+| Saves `~/…` literally → fake `~` folders | Always expand home paths to absolute paths |
+| Self-update restart loop | No auto-updater |
+| Clones a full second game (~14GB+) | **In-place** install into the Steam folder |
+| Shell / BepInEx launch left to the user | **Play** injects Doorstop + **`-noeac`** for you |
+| Sequoia “app is damaged” | Release zip includes **Open Me First** quarantine fix |
+
+## Features (v0.2)
 
 - Detect Steam install + `appmanifest_251570.acf` beta branch  
-- Disk free-space readout  
-- **Undead Legacy Experimental** download + in-place install  
-- Launch via `run_bepinex.sh` in Terminal (EAC off)  
+- Free disk space readout  
+- Progress bar install (download → unpack → copy) on a **background thread** (UI stays responsive)  
+- **Undead Legacy Experimental** in-place install (`doorstop_*` files verified)  
+- **Play** launches the game with Doorstop + Easy Anti-Cheat off (no shell scripts for end users)  
+- Friend-friendly UI + `FRIEND-SETUP.md`  
 
-Not yet: full overhaul catalog, modlets, multi-install profiles, Linux/Windows polish.
+## End-user (your friend)
 
-## Requirements
+1. Steam → 7DTD → Betas → **`alpha20.7`** → wait  
+2. Open **7D2D Mac Launcher** (use **Open Me First** if Mac says “damaged”)  
+3. **Install Undead Legacy** → wait  
+4. **Play Undead Legacy** (every time — not Steam’s Play)  
 
-- macOS 11+  
-- Steam + **7 Days to Die**  
-- For Undead Legacy today: Steam beta **`alpha20.7`**  
-- [Rust](https://rustup.rs/), [Bun](https://bun.sh/) (or npm), Xcode CLT  
+See [FRIEND-SETUP.md](./FRIEND-SETUP.md).
 
 ## Develop
 
+**Requirements:** macOS 11+, [Rust](https://rustup.rs/), [Bun](https://bun.sh/) (or npm), Xcode CLT, Steam + 7DTD.
+
 ```bash
+git clone https://github.com/nukleas/7d2d-mac-launcher.git
 cd 7d2d-mac-launcher
 bun install
 bun run tauri dev
 ```
 
-## Build .app / .dmg
-
 ```bash
-bun run tauri build
+# Rust unit tests
+bun run test:rust
+
+# Release .app + .dmg
+bun run package
+
+# Friend distribution folder + zip (Open Me First + guide)
+bun run release-zip
 ```
 
-Artifacts under `src-tauri/target/release/bundle/`.
+Artifacts:
 
-## Undead Legacy notes
+- App/DMG: `src-tauri/target/release/bundle/`  
+- Zip (after `release-zip`): `dist-release/UndeadLegacy-Mac-Setup.zip`  
 
-- Official downloads: [ul.subquake.com/download](https://ul.subquake.com/download)  
-- This app uses the experimental package endpoints (`ml_exp` / `exp`)  
-- Install is **in-place** under your Steam game folder (no second full copy)  
-- First launch may need **Privacy & Security → Allow** for `run_bepinex.sh`  
+## Architecture (short)
 
-## Why not a git fork?
+| Layer | Role |
+|-------|------|
+| Tauri 2 + Rust | Steam detect, download, install, launch |
+| Vite + TypeScript | Friendly UI, progress events |
+| UL package | Official experimental zip from Subquake |
 
-Public GitHub for V5 is a **docs site** + release binaries. The Unity project path embedded in builds (`…/7D2DModLauncherV5/Assets/Scripts/…`) is not published. We reimplemented the Mac workflows we need.
+Launch always sets:
 
-## License
+- `DYLD_INSERT_LIBRARIES` → `doorstop_libs/libdoorstop_*.dylib`  
+- `DOORSTOP_INVOKE_DLL_PATH` → BepInEx preloader  
+- **`-noeac -nogs`** so `UndeadLegacy.dll` loads (without this you get red XUi/texture spam)
 
-MIT (this project).  
-7 Days to Die © The Fun Pimps. Undead Legacy © Subquake.  
-Not affiliated with SphereII / The7D2DModLauncher.
+## License & credits
+
+- **MIT** — this project ([LICENSE](./LICENSE))  
+- *7 Days to Die* © The Fun Pimps  
+- *Undead Legacy* © Subquake — [ul.subquake.com](https://ul.subquake.com)  
+- Not affiliated with SphereII / The7D2DModLauncher  
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Please keep the end-user path **no Terminal required**.
