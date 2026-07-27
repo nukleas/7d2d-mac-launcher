@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Sign + notarize (keychain profile) + staple + friend zip.
-# One-time: xcrun notarytool store-credentials "notary-profile" ...
+# Requires .env.signing (see .env.signing.example and docs/SIGNING.md).
+# One-time: xcrun notarytool store-credentials "YOUR_PROFILE" ...
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,8 +14,23 @@ if [[ -f "$ROOT/.env.signing" ]]; then
   set +a
 fi
 
-IDENTITY="${APPLE_SIGNING_IDENTITY:-Developer ID Application: Your Name Or Company (TEAMIDHERE)}"
-PROFILE="${NOTARY_PROFILE:-notary-profile}"
+if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  echo "error: APPLE_SIGNING_IDENTITY is required." >&2
+  echo "  cp .env.signing.example .env.signing  # then edit with your cert name" >&2
+  echo "  See docs/SIGNING.md" >&2
+  exit 1
+fi
+if [[ -z "${APPLE_TEAM_ID:-}" ]]; then
+  echo "error: APPLE_TEAM_ID is required (10-char team id)." >&2
+  exit 1
+fi
+if [[ -z "${NOTARY_PROFILE:-}" ]]; then
+  echo "error: NOTARY_PROFILE is required (notarytool keychain profile name)." >&2
+  exit 1
+fi
+
+IDENTITY="$APPLE_SIGNING_IDENTITY"
+PROFILE="$NOTARY_PROFILE"
 PRODUCT="7D2D Mac Launcher"
 VERSION="$(node -p "require('./package.json').version")"
 
@@ -32,7 +48,7 @@ if ! xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1; the
 fi
 
 export APPLE_SIGNING_IDENTITY="$IDENTITY"
-export APPLE_TEAM_ID="${APPLE_TEAM_ID:-TEAMIDHERE}"
+export APPLE_TEAM_ID
 
 echo "==> Build (codesign via Developer ID; notarize handled below)…"
 # Avoid PIPESTATUS/zsh issues — capture exit explicitly
