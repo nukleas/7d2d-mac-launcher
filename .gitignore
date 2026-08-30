@@ -30,7 +30,10 @@ src-tauri/target
 dist-release/
 
 # Local signing secrets (never commit)
-.env.signing
+# Also catches .bak/.old/.orig copies — an unmatched backup of this file would
+# otherwise be picked up by `git add -A` and published with the signing identity.
+.env.signing*
+!.env.signing.example
 *.p8
 AuthKey_*.p8
 
