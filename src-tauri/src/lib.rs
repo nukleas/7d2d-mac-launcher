@@ -1,13 +1,16 @@
+mod channel;
 mod paths;
 mod progress;
 mod steam;
 mod ul;
 
+use channel::{Channel, GameLine};
 use paths::expand_user_path;
+use progress::Progress;
 use serde::Serialize;
 use steam::{detect_game, free_space_bytes, GameInfo};
 use tauri::AppHandle;
-use ul::{install_undead_legacy_experimental, launch_undead_legacy, InstallResult, LaunchResult};
+use ul::{install_undead_legacy, launch_undead_legacy, InstallResult, LaunchResult};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,7 +38,8 @@ async fn get_game_info(path: Option<String>) -> GameInfo {
             beta_key: None,
             name: None,
             size_on_disk_bytes: None,
-            looks_like_a20: false,
+            game_line: GameLine::Unknown,
+            suggested_channel: None,
             has_bepinex: false,
             has_run_bepinex: false,
             has_doorstop: false,
@@ -69,23 +73,25 @@ async fn get_disk_info(path: Option<String>) -> DiskInfo {
 /// Heavy install (download / unzip / copy) always runs on a blocking worker pool
 /// so the UI thread stays responsive and progress events can paint.
 #[tauri::command]
-async fn install_ul_experimental(
+async fn install_ul(
     app: AppHandle,
+    channel: Option<Channel>,
     path: Option<String>,
     force: Option<bool>,
 ) -> InstallResult {
+    let channel = channel.unwrap_or_default();
     let force = force.unwrap_or(false);
     let app_for_job = app.clone();
 
     match tauri::async_runtime::spawn_blocking(move || {
-        install_undead_legacy_experimental(&app_for_job, path, force)
+        install_undead_legacy(&Progress::to_app(app_for_job), channel, path, force)
     })
     .await
     {
         Ok(result) => result,
         Err(e) => {
             crate::progress::progress(
-                &app,
+                &Progress::to_app(app),
                 "error",
                 "Install crashed",
                 format!("Background worker failed: {e}"),
@@ -93,9 +99,7 @@ async fn install_ul_experimental(
             );
             InstallResult {
                 ok: false,
-                message: format!(
-                    "The install worker stopped unexpectedly. Try again. ({e})"
-                ),
+                message: format!("The install worker stopped unexpectedly. Try again. ({e})"),
                 game_path: String::new(),
                 steps: vec![],
                 download_bytes: None,
@@ -123,7 +127,7 @@ pub fn run() {
             expand_path,
             get_game_info,
             get_disk_info,
-            install_ul_experimental,
+            install_ul,
             launch_ul
         ])
         .run(tauri::generate_context!())

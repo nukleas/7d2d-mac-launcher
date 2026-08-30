@@ -1,5 +1,8 @@
 //! Locate the Steam install of 7 Days to Die on macOS.
 
+use crate::channel::{
+    channel_for, line_from_beta_key, unity_says_alpha20, Channel, Doorstop, GameLine,
+};
 use crate::paths::{default_steam_game_path, default_steam_manifest_path, expand_user_path};
 use serde::Serialize;
 use std::fs;
@@ -15,10 +18,14 @@ pub struct GameInfo {
     pub beta_key: Option<String>,
     pub name: Option<String>,
     pub size_on_disk_bytes: Option<u64>,
-    pub looks_like_a20: bool,
+    /// Which base-game generation is installed — decides the usable UL channel.
+    pub game_line: GameLine,
+    /// The UL channel that matches `game_line`, used to preselect the UI.
+    pub suggested_channel: Option<Channel>,
     pub has_bepinex: bool,
     pub has_run_bepinex: bool,
-    /// Unity Doorstop dylibs required for Mac launch (`doorstop_libs/libdoorstop_*.dylib`).
+    /// Unity Doorstop dylib for Mac launch. UL 2.6 ships `libdoorstop_x64.dylib`,
+    /// UL 2.7 a single universal `libdoorstop.dylib`; either counts.
     pub has_doorstop: bool,
     pub has_mods_folder: bool,
     /// True when BepInEx + doorstop + launch script + Mods are all present.
@@ -35,7 +42,12 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
         .unwrap_or_else(default_steam_game_path);
 
     let manifest_path = default_steam_manifest_path();
-    let (beta_key, name, size_on_disk) = parse_manifest(&manifest_path);
+    let manifest = parse_manifest(&manifest_path);
+    // Surface the branch that is actually playable, not the one being fetched.
+    let beta_key = manifest
+        .installed_branch
+        .clone()
+        .or_else(|| manifest.requested_branch.clone());
 
     let app_path = game_path.join("7DaysToDie.app");
     let found = game_path.is_dir() && app_path.is_dir();
@@ -47,37 +59,37 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
         ));
     }
 
-    let looks_like_a20 = beta_key
-        .as_deref()
-        .map(|b| b.to_ascii_lowercase().contains("alpha20") || b.contains("20.7"))
-        .unwrap_or(false)
-        || unity_version_suggests_a20(&app_path);
+    let game_line = if found {
+        detect_game_line(&app_path, &manifest)
+    } else {
+        GameLine::Unknown
+    };
+    let suggested_channel = channel_for(game_line);
 
-    if found && !looks_like_a20 {
-        notes.push(
-            "Steam beta does not look like Alpha 20.7. Undead Legacy Experimental currently requires A20.7. \
-             In Steam: right-click 7 Days to Die → Properties → Betas → alpha20.7."
+    match suggested_channel {
+        Some(channel) => notes.push(format!(
+            "Game looks like {} — install {}.",
+            channel.game_label(),
+            channel.ul_label()
+        )),
+        None if game_line == GameLine::Updating => notes.push(
+            "Steam has switched branch but hasn't finished downloading it — the game files on \
+             disk are still the old version. Let Steam finish, then check again."
                 .into(),
-        );
-    }
-
-    if found && looks_like_a20 {
-        notes.push("Steam branch looks compatible with Undead Legacy (A20.7 era).".into());
+        ),
+        None if found => notes.push(
+            "Could not tell which version of the game this is. Undead Legacy needs either \
+             Alpha 20.7 (for UL 2.6) or v2.6 (for UL 2.7)."
+                .into(),
+        ),
+        None => {}
     }
 
     let has_bepinex = game_path.join("BepInEx").is_dir();
     let has_run_bepinex = game_path.join("run_bepinex.sh").is_file();
-    let has_doorstop = game_path
-        .join("doorstop_libs")
-        .join("libdoorstop_x64.dylib")
-        .is_file()
-        || game_path
-            .join("doorstop_libs")
-            .join("libdoorstop_x86.dylib")
-            .is_file();
-    let has_mods_folder = game_path.join("Mods").is_dir()
-        || app_path.join("Mods").is_dir()
-        || app_path.join("Contents").join("Mods").is_dir();
+    let has_doorstop = find_doorstop(&game_path).is_some();
+    // Mods belong at the game root; copies inside the .app bundle are never read.
+    let has_mods_folder = game_path.join("Mods").is_dir();
 
     // Fully playable: BepInEx + doorstop dylibs + Mods. Shell script optional (launcher injects itself).
     let mod_ready = has_bepinex && has_doorstop && has_mods_folder;
@@ -98,9 +110,10 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
         app_path: app_path.to_string_lossy().into_owned(),
         manifest_path: manifest_path.to_string_lossy().into_owned(),
         beta_key,
-        name,
-        size_on_disk_bytes: size_on_disk,
-        looks_like_a20,
+        name: manifest.name.clone(),
+        size_on_disk_bytes: manifest.size_on_disk,
+        game_line,
+        suggested_channel,
         has_bepinex,
         has_run_bepinex,
         has_doorstop,
@@ -110,16 +123,47 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
     }
 }
 
-fn parse_manifest(path: &Path) -> (Option<String>, Option<String>, Option<u64>) {
+/// What the manifest says about the app's branch.
+pub struct Manifest {
+    /// `MountedConfig.BetaKey` — the branch whose files are on disk *now*.
+    pub installed_branch: Option<String>,
+    /// `UserConfig.BetaKey` — the branch Steam has been asked to install.
+    /// Differs from `installed_branch` while a switch is still downloading.
+    pub requested_branch: Option<String>,
+    pub name: Option<String>,
+    pub size_on_disk: Option<u64>,
+}
+
+fn parse_manifest(path: &Path) -> Manifest {
     let Ok(text) = fs::read_to_string(path) else {
-        return (None, None, None);
+        return Manifest {
+            installed_branch: None,
+            requested_branch: None,
+            name: None,
+            size_on_disk: None,
+        };
     };
 
-    // VDF is simple key "value" pairs; good enough for BetaKey / name / SizeOnDisk.
-    let beta = vdf_get(&text, "BetaKey");
-    let name = vdf_get(&text, "name");
-    let size = vdf_get(&text, "SizeOnDisk").and_then(|s| s.parse().ok());
-    (beta, name, size)
+    // BetaKey appears twice — once under UserConfig (requested) and once under
+    // MountedConfig (installed). Reading whichever comes first conflates
+    // "what Steam is fetching" with "what you can actually play".
+    Manifest {
+        installed_branch: vdf_get_in(&text, "MountedConfig", "BetaKey"),
+        requested_branch: vdf_get_in(&text, "UserConfig", "BetaKey"),
+        name: vdf_get(&text, "name"),
+        size_on_disk: vdf_get(&text, "SizeOnDisk").and_then(|s| s.parse().ok()),
+    }
+}
+
+/// Read `key` from inside the `section { ... }` block only.
+fn vdf_get_in(text: &str, section: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{section}\"");
+    let start = text.find(&needle)? + needle.len();
+    let rest = &text[start..];
+    let open = rest.find('{')? + 1;
+    let body = &rest[open..];
+    let end = body.find('}')?;
+    vdf_get(&body[..end], key)
 }
 
 fn vdf_get(text: &str, key: &str) -> Option<String> {
@@ -149,13 +193,51 @@ fn vdf_get(text: &str, key: &str) -> Option<String> {
     None
 }
 
-fn unity_version_suggests_a20(app_path: &Path) -> bool {
-    // A20 Mac builds used Unity 2020.x; later branches moved on.
+/// Work out which base-game build is actually playable right now.
+///
+/// Steam records the branch twice: `UserConfig` is what you picked, and
+/// `MountedConfig` is what is installed. Picking a branch flips the first
+/// immediately while the second only changes after a ~15 GB download, so a
+/// mismatch means "still updating" — and installing a mod for the requested
+/// branch onto the mounted one produces a broken game that looks fine.
+///
+/// The Unity runtime is a fallback for when the manifest can't be read. It can
+/// only separate A20 from everything newer, since v2.6 and V3.2 share a Unity
+/// generation, which is why the manifest is preferred.
+fn detect_game_line(app_path: &Path, manifest: &Manifest) -> GameLine {
+    match (&manifest.installed_branch, &manifest.requested_branch) {
+        (Some(installed), Some(requested)) if installed != requested => return GameLine::Updating,
+        (Some(installed), _) => return line_from_beta_key(Some(installed)),
+        (None, _) => {}
+    }
+
+    // No MountedConfig — fall back to the app bundle.
     let plist = app_path.join("Contents/Info.plist");
-    let Ok(text) = fs::read_to_string(plist) else {
-        return false;
-    };
-    text.contains("2020.3")
+    match fs::read_to_string(plist)
+        .ok()
+        .and_then(|text| unity_says_alpha20(&text))
+    {
+        Some(true) => GameLine::A20,
+        Some(false) => line_from_beta_key(manifest.requested_branch.as_deref()),
+        None => GameLine::Unknown,
+    }
+}
+
+/// Locate the Doorstop dylib and identify which generation it belongs to.
+///
+/// Returns the newest generation present, since that is the one whose
+/// environment variables we must speak when launching.
+pub fn find_doorstop(game_path: &Path) -> Option<(Doorstop, PathBuf)> {
+    let libs = game_path.join("doorstop_libs");
+    for generation in Doorstop::all() {
+        for name in generation.dylib_names() {
+            let candidate = libs.join(name);
+            if candidate.is_file() {
+                return Some((generation, candidate));
+            }
+        }
+    }
+    None
 }
 
 pub fn game_root_from_info(info: &GameInfo) -> PathBuf {
@@ -179,3 +261,104 @@ pub fn free_space_bytes(path: &Path) -> Option<u64> {
     Some(avail_k * 1024)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A20_PLIST: &str = "Unity Player version 2020.3.14f1 (d0d1bb862f9d).";
+    const V2_PLIST: &str = "Unity Player version 2022.3.29f1 (8d91ffdec66b).";
+
+    fn manifest(installed: Option<&str>, requested: Option<&str>) -> Manifest {
+        Manifest {
+            installed_branch: installed.map(str::to_string),
+            requested_branch: requested.map(str::to_string),
+            name: None,
+            size_on_disk: None,
+        }
+    }
+
+    fn game_with(plist: Option<&str>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ul-line-test-{}",
+            plist.map(|p| p.len()).unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let app = dir.join("7DaysToDie.app/Contents");
+        fs::create_dir_all(&app).unwrap();
+        if let Some(text) = plist {
+            fs::write(app.join("Info.plist"), text).unwrap();
+        }
+        dir.join("7DaysToDie.app")
+    }
+
+    #[test]
+    fn mounted_branch_decides_when_it_matches_the_request() {
+        let g = game_with(Some(V2_PLIST));
+        assert_eq!(
+            detect_game_line(&g, &manifest(Some("alpha20.7"), Some("alpha20.7"))),
+            GameLine::A20
+        );
+        assert_eq!(
+            detect_game_line(&g, &manifest(Some("v2.6"), Some("v2.6"))),
+            GameLine::V26
+        );
+    }
+
+    /// Observed live: UserConfig said `v2.6` while MountedConfig still said
+    /// `alpha20.7`, because the 15 GB branch download had not finished. Steam
+    /// records both, so the mismatch is directly readable.
+    #[test]
+    fn requested_branch_differing_from_mounted_is_updating() {
+        let g = game_with(Some(A20_PLIST));
+        assert_eq!(
+            detect_game_line(&g, &manifest(Some("alpha20.7"), Some("v2.6"))),
+            GameLine::Updating
+        );
+        assert_eq!(
+            detect_game_line(&g, &manifest(Some("v2.6"), Some("v3.2.0"))),
+            GameLine::Updating
+        );
+    }
+
+    #[test]
+    fn parses_betakey_from_the_right_section() {
+        let acf = r#"
+"AppState"
+{
+	"UserConfig"
+	{
+		"BetaKey"		"v2.6"
+	}
+	"MountedConfig"
+	{
+		"BetaKey"		"alpha20.7"
+	}
+}
+"#;
+        assert_eq!(
+            vdf_get_in(acf, "UserConfig", "BetaKey").as_deref(),
+            Some("v2.6")
+        );
+        assert_eq!(
+            vdf_get_in(acf, "MountedConfig", "BetaKey").as_deref(),
+            Some("alpha20.7")
+        );
+    }
+
+    /// Observed live: Steam had `BetaKey "v2.6"` while the bundle was still
+    /// Unity 2020.3 (A20.7) because the branch download had not finished.
+    /// Trusting the branch there installs a mod for the wrong game.
+    /// With no MountedConfig at all we can still recognise an A20 install
+    /// from the Unity runtime in the bundle.
+    #[test]
+    fn falls_back_to_unity_without_a_mounted_branch() {
+        assert_eq!(
+            detect_game_line(&game_with(Some(A20_PLIST)), &manifest(None, Some("v2.6"))),
+            GameLine::A20
+        );
+        assert_eq!(
+            detect_game_line(&game_with(Some(V2_PLIST)), &manifest(None, Some("v2.6"))),
+            GameLine::V26
+        );
+    }
+}

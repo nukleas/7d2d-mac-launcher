@@ -59,7 +59,9 @@ mod tests {
         let p = expand_user_path("~/Library/Application Support/Steam");
         assert!(p.is_absolute());
         assert!(!p.to_string_lossy().starts_with('~'));
-        assert!(p.to_string_lossy().contains("Library/Application Support/Steam"));
+        assert!(p
+            .to_string_lossy()
+            .contains("Library/Application Support/Steam"));
     }
 
     #[test]

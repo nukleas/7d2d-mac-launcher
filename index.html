@@ -33,11 +33,11 @@
       <section class="howto panel">
         <h2 class="howto-title">Do these 4 things (in order)</h2>
         <ol class="howto-list">
+          <li>Open this app and pick which Undead Legacy you want (2.7 is the newest)</li>
           <li>
-            <strong>Steam:</strong> right-click <em>7 Days to Die</em> → Properties → Betas → choose
-            <strong>alpha20.7</strong> → wait until Steam finishes updating
+            <strong>Steam:</strong> right-click <em>7 Days to Die</em> → Properties → Betas → set the
+            branch this app asks for → wait until Steam finishes updating
           </li>
-          <li>Open this app — wait for the green light that says the game is ready</li>
           <li>Press <strong>Install Undead Legacy</strong> and wait (can take several minutes)</li>
           <li>
             Press <strong>Play</strong> — use this button every time (don’t use Steam’s Play for the
@@ -107,10 +107,28 @@
           It does <strong>not</strong> make a huge second copy of the game.
         </p>
 
+        <fieldset class="channel-pick" id="channel-pick">
+          <legend>Which version?</legend>
+          <label class="check">
+            <input type="radio" name="ul-channel" value="experimental" checked />
+            <span>
+              <strong>Undead Legacy 2.7</strong> — experimental, needs game <strong>v2.6</strong>
+              <em class="hint">Newest. Updated often; saves can break between builds.</em>
+            </span>
+          </label>
+          <label class="check">
+            <input type="radio" name="ul-channel" value="stable" />
+            <span>
+              <strong>Undead Legacy 2.6</strong> — stable, needs game <strong>Alpha 20.7</strong>
+              <em class="hint">Unchanged since 2022. Pick this to keep an existing A20.7 save.</em>
+            </span>
+          </label>
+        </fieldset>
+
         <ul class="checklist" id="req-list">
           <li data-req="steam">7 Days to Die installed in Steam</li>
-          <li data-req="beta">Steam beta set to <strong>alpha20.7</strong></li>
-          <li data-req="space">About 2 GB free space (install is smaller; buffer helps)</li>
+          <li data-req="beta">Steam beta set to the branch this version needs</li>
+          <li data-req="space">Enough free space to download and unpack</li>
         </ul>
 
         <label class="check advanced-only">

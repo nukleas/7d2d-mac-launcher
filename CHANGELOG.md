@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0
+
+Undead Legacy 2.7 shipped for game v2.6 on 2026-08-17, ending the four-year
+A20.7 freeze. Every part of the old install path had broken against it.
+
+### Features
+- **Release channels**: stable (UL 2.6.x / game A20.7) and experimental
+  (UL 2.7.x / game v2.6), picked in the UI and auto-selected from the game found
+- Multi-part packages: experimental ships as two archives that merge into one tree
+- Downloads retry and fall back to a second mirror per part
+- Install renames the staged tree into place instead of copying it
+
+### Fixes
+- **Dead download URL**: `?v=ml_exp` now serves a 978-byte `LICENSE.zip`;
+  replaced with the current per-channel catalog keys and GitLab fallbacks
+- **Inverted version gate**: the launcher hard-blocked anything that wasn't
+  A20.7 and told users to downgrade — exactly wrong for UL 2.7
+- **Silent launch failure**: UL 2.7 ships Doorstop 4, which renamed every
+  environment variable. The old names left the game starting *unmodded* with no
+  error. The generation is now read off the installed dylib
+- **Renamed dylib**: UL 2.7 ships one universal `libdoorstop.dylib` (x86_64 +
+  arm64) where 2.6 shipped `libdoorstop_x64/x86.dylib`; both are recognised
+- Game version detected from the bundle's Unity build, since
+  `CFBundleShortVersionString` reads `1.0` on both A20.7 and v2.x
+- Stopped duplicating `Mods/` into `7DaysToDie.app` — several GB that the game
+  never reads; existing copies are removed on install
+- Free-space check is per channel instead of a flat 2 GB
+- Staging tree is deleted after a successful install
+
 ## 0.2.0
 
 ### Features

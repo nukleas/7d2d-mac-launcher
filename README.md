@@ -1,6 +1,6 @@
 # 7D2D Mac Launcher
 
-Clean-room, **macOS-first** installer for *7 Days to Die* overhauls — starting with **Undead Legacy Experimental**.
+Clean-room, **macOS-first** installer for *7 Days to Die* overhauls — currently **Undead Legacy**, both release channels.
 
 Built for people who just want to play (and for friends who should never have to open Terminal).
 
@@ -15,22 +15,42 @@ Built for people who just want to play (and for friends who should never have to
 | Clones a full second game (~14GB+) | **In-place** install into the Steam folder |
 | Shell / BepInEx launch left to the user | **Play** injects Doorstop + **`-noeac`** for you |
 | Sequoia “app is damaged” | Release zip includes **Open Me First** quarantine fix |
+| Leaves a ~30 GB cloned `Alpha20/` behind | Installs in place; nothing to clean up |
 
-## Features (v0.2)
+## Release channels
 
-- Detect Steam install + `appmanifest_251570.acf` beta branch  
-- Free disk space readout  
-- Progress bar install (download → unpack → copy) on a **background thread** (UI stays responsive)  
-- **Undead Legacy Experimental** in-place install (`doorstop_*` files verified)  
-- **Play** launches the game with Doorstop + Easy Anti-Cheat off (no shell scripts for end users)  
+Subquake ships two Undead Legacy lines at once, against different base games.
+Pick one in the app; it auto-selects the one matching your install.
+
+| Channel | UL | Base game | Steam branch | Package |
+|---------|----|-----------|--------------|---------|
+| **Experimental** | 2.7.x | v2.6 | `v2.6` | two archives (~6.9 GB, needs ~14 GB free) |
+| **Stable** | 2.6.x | Alpha 20.7 | `alpha20.7` | one archive (needs ~5 GB free) |
+
+Both are Steam **beta** branches — Steam's default is V3.2, which no UL build
+supports, so "no beta selected" is a failure state rather than a safe default.
+
+Both are pinned to exact commits. 7 Days to Die refuses connections between a
+client and server on different mod builds, so every player must install the same
+one — see `server/README.md`.
+
+## Features (v0.3)
+
+- Detect Steam install, and classify the game as A20 or v2.x from its Unity build  
+- Per-channel version gate, free-space check and download set  
+- Multi-part download → single staging tree → **rename** into the game folder  
+- Retries when a large download drops, and reuses parts already fetched —
+  GitLab ignores `Range`, so an interrupted transfer otherwise restarts from zero  
+- **Play** launches with the right Doorstop generation + Easy Anti-Cheat off  
 - Friend-friendly UI + `FRIEND-SETUP.md`  
 
 ## End-user (your friend)
 
-1. Steam → 7DTD → Betas → **`alpha20.7`** → wait  
-2. Open **7D2D Mac Launcher** (use **Open Me First** if Mac says “damaged”)  
-3. **Install Undead Legacy** → wait  
-4. **Play Undead Legacy** (every time — not Steam’s Play)  
+1. Open **7D2D Mac Launcher** (use **Open Me First** if Mac says “damaged”)  
+2. Pick which Undead Legacy you want — the app says which Steam branch it needs  
+3. Steam → 7DTD → Betas → set that branch → wait  
+4. **Install Undead Legacy** → wait  
+5. **Play Undead Legacy** (every time — not Steam’s Play)  
 
 See [FRIEND-SETUP.md](./FRIEND-SETUP.md).
 
@@ -72,12 +92,16 @@ Signing details: [docs/SIGNING.md](./docs/SIGNING.md).
 |-------|------|
 | Tauri 2 + Rust | Steam detect, download, install, launch |
 | Vite + TypeScript | Friendly UI, progress events |
-| UL package | Official experimental zip from Subquake |
+| UL package | Official archives from Subquake, per channel |
 
 Launch always sets:
 
-- `DYLD_INSERT_LIBRARIES` → `doorstop_libs/libdoorstop_*.dylib`  
-- `DOORSTOP_INVOKE_DLL_PATH` → BepInEx preloader  
+- `DYLD_INSERT_LIBRARIES` → the Doorstop dylib in `doorstop_libs/`  
+- the preloader path — but **the variable name depends on the payload**:
+  UL 2.6 ships Doorstop 3 (`DOORSTOP_INVOKE_DLL_PATH`), UL 2.7 ships Doorstop 4
+  (`DOORSTOP_TARGET_ASSEMBLY`). Using the wrong one is silent: the game starts
+  unmodded rather than failing, so the generation is read off the installed
+  dylib name.  
 - **`-noeac -nogs`** so `UndeadLegacy.dll` loads (without this you get red XUi/texture spam)
 
 ## License & credits
