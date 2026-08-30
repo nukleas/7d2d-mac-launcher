@@ -764,3 +764,38 @@ body.is-installing .progress-card {
     animation: none;
   }
 }
+
+/* Release channel picker — stable (A20.7) vs experimental (v2.6) */
+.channel-pick {
+  margin: 0 0 1rem;
+  padding: 0.75rem 0.85rem 0.35rem;
+  border: 1px solid var(--cd-border-dim);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.channel-pick legend {
+  padding: 0 0.4rem;
+  color: var(--cd-text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.channel-pick .check {
+  align-items: flex-start;
+  color: var(--cd-text-secondary);
+  font-size: 0.9rem;
+}
+
+.channel-pick .check input {
+  margin-top: 0.25rem;
+  flex: none;
+}
+
+.channel-pick .hint {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--cd-text-muted);
+  font-size: 0.8rem;
+  font-style: normal;
+}

@@ -39,3 +39,7 @@ AuthKey_*.p8
 *~
 .DS_Store
 
+
+# Server connection details (address + password) — never publish
+SERVER-CONNECT.local.md
+*.local.md

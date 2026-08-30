@@ -1,14 +1,14 @@
 //! In-place Undead Legacy install for macOS (no full game clone).
 
+use crate::channel::{Channel, Doorstop};
 use crate::paths::expand_user_path;
-use crate::progress::{progress, progress_bytes};
-use crate::steam::{detect_game, free_space_bytes, game_root_from_info};
+use crate::progress::{progress, progress_bytes, Progress};
+use crate::steam::{detect_game, find_doorstop, free_space_bytes, game_root_from_info};
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tauri::AppHandle;
 use walkdir::WalkDir;
 use zip::ZipArchive;
 
@@ -16,10 +16,13 @@ use zip::ZipArchive;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-/// Official Mod-Launcher zip endpoint for experimental (same catalog V5 uses).
-const UL_EXP_URL: &str = "https://ul.subquake.com/dl/index.php?v=ml_exp";
-/// Public experimental download.
-const UL_EXP_URL_ALT: &str = "https://ul.subquake.com/dl?v=exp";
+/// Anything smaller than this is an error page or a stray LICENSE.zip, not a
+/// mod package — the retired `?v=ml_exp` key serves exactly such a 978-byte file.
+const MIN_PLAUSIBLE_ARCHIVE_BYTES: u64 = 1_000_000;
+
+/// GitLab streams archives without a content-length and sometimes drops the
+/// connection partway through a few-hundred-megabyte transfer.
+const DOWNLOAD_ATTEMPTS: u32 = 4;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,8 +42,9 @@ pub struct LaunchResult {
     pub command: String,
 }
 
-pub fn install_undead_legacy_experimental(
-    app: &AppHandle,
+pub fn install_undead_legacy(
+    app: &Progress,
+    channel: Channel,
     game_path_override: Option<String>,
     force: bool,
 ) -> InstallResult {
@@ -66,8 +70,7 @@ pub fn install_undead_legacy_experimental(
         );
         return InstallResult {
             ok: false,
-            message: "We couldn’t find 7 Days to Die. Install it in Steam, then try again."
-                .into(),
+            message: "We couldn’t find 7 Days to Die. Install it in Steam, then try again.".into(),
             game_path: game.to_string_lossy().into_owned(),
             steps: info.notes,
             download_bytes: None,
@@ -84,18 +87,36 @@ pub fn install_undead_legacy_experimental(
         6,
     );
 
-    if !info.looks_like_a20 && !force {
+    if !channel.accepts(info.game_line) && !force {
+        let updating = info.game_line == crate::channel::GameLine::Updating;
         progress(
             app,
             "error",
-            "Wrong game version",
-            "Switch Steam beta to alpha20.7",
+            if updating {
+                "Steam is still updating"
+            } else {
+                "Wrong game version"
+            },
+            format!("{} needs game {}", channel.ul_label(), channel.game_label()),
             0,
         );
         return InstallResult {
             ok: false,
-            message: "Undead Legacy needs Steam beta “alpha20.7”. In Steam: right-click 7 Days to Die → Properties → Betas → alpha20.7. Wait for the download, then try again."
-                .into(),
+            message: if updating {
+                // Installing now would drop a mod built for one game generation
+                // on top of the other, and the result looks installed but is broken.
+                format!(
+                    "Steam hasn't finished downloading {}. The branch is selected, but the game files on disk are still the old version. Wait for Steam to finish, then press Install.",
+                    channel.game_label()
+                )
+            } else {
+                format!(
+                    "{} needs 7 Days to Die {}. {}",
+                    channel.ul_label(),
+                    channel.game_label(),
+                    channel.switch_hint()
+                )
+            },
             game_path: game.to_string_lossy().into_owned(),
             steps: info.notes,
             download_bytes: None,
@@ -112,17 +133,22 @@ pub fn install_undead_legacy_experimental(
             format!("{free_gb:.1} GB available"),
             8,
         );
-        if free < 2_000_000_000 {
+        let needed = channel.required_free_bytes();
+        if free < needed {
+            let needed_gb = needed as f64 / 1_073_741_824.0;
             progress(
                 app,
                 "error",
                 "Not enough free space",
-                "Need about 2 GB free",
+                format!("Need about {needed_gb:.0} GB free"),
                 0,
             );
             return InstallResult {
                 ok: false,
-                message: "Your disk is almost full. Free at least 2 GB, then try again.".into(),
+                message: format!(
+                    "Your disk is almost full. {} needs about {needed_gb:.0} GB free to download, unpack and install — you have {free_gb:.1} GB. Free some space, then try again.",
+                    channel.ul_label()
+                ),
                 game_path: game.to_string_lossy().into_owned(),
                 steps,
                 download_bytes: None,
@@ -142,62 +168,136 @@ pub fn install_undead_legacy_experimental(
         );
     }
 
-    let zip_path = cache.join("UndeadLegacy-Experimental.zip");
-    progress(
-        app,
-        "download",
-        "Downloading Undead Legacy…",
-        "This can take a few minutes — please leave this window open",
-        10,
-    );
-    steps.push("Downloading Undead Legacy Experimental…".into());
-
-    let download_bytes = match download_first_ok(app, &[UL_EXP_URL, UL_EXP_URL_ALT], &zip_path) {
-        Ok(n) => {
-            steps.push(format!("Downloaded {}", friendly_bytes(n)));
-            progress(
-                app,
-                "download",
-                "Download complete",
-                friendly_bytes(n),
-                68,
-            );
-            Some(n)
-        }
-        Err(e) => {
-            return fail(app, &game, steps, format!("Download failed: {e}"));
-        }
-    };
-
-    let extract_dir = cache.join("ul-extract");
-    let _ = fs::remove_dir_all(&extract_dir);
-    if let Err(e) = fs::create_dir_all(&extract_dir) {
+    // Every part is unpacked into one staging tree, so the copy phase below
+    // sees a single merged package no matter how many archives it arrived in.
+    let staging = cache.join(format!("{}-staging", channel.cache_stem()));
+    let _ = fs::remove_dir_all(&staging);
+    if let Err(e) = fs::create_dir_all(&staging) {
         return fail(
             app,
             &game,
             steps,
-            format!("Could not create extract folder: {e}"),
+            format!("Could not create staging folder: {e}"),
         );
     }
 
-    progress(
-        app,
-        "extract",
-        "Unpacking files…",
-        "Almost there",
-        70,
-    );
-    steps.push("Unpacking…".into());
-    if let Err(e) = extract_zip(app, &zip_path, &extract_dir) {
-        return fail(app, &game, steps, format!("Unpack failed: {e}"));
+    let parts = channel.parts();
+    let mut download_total: u64 = 0;
+
+    for (index, part) in parts.iter().enumerate() {
+        let span = PartSpan::new(index, parts.len());
+        progress(
+            app,
+            "download",
+            format!("Downloading {}…", channel.ul_label()),
+            format!(
+                "Getting {} — this can take a few minutes, please leave this window open",
+                part.label
+            ),
+            span.download_start(),
+        );
+        // Record which build this is: the first question when someone can't
+        // join a server is whether they're on the same one.
+        steps.push(format!(
+            "Installing {} — build {}",
+            part.label,
+            part.build_id()
+        ));
+
+        let zip_path = cache.join(format!("{}-{index}.zip", channel.cache_stem()));
+
+        // GitLab ignores Range headers, so a dropped transfer restarts from
+        // zero — and part 1 is gigabytes. A complete archive from an earlier
+        // attempt is therefore worth keeping and reusing.
+        if let Some(cached) = complete_archive_size(&zip_path) {
+            download_total += cached;
+            steps.push(format!(
+                "Reused {} already downloaded ({})",
+                part.label,
+                friendly_bytes(cached)
+            ));
+            progress(
+                app,
+                "download",
+                "Already downloaded",
+                format!("Reusing {}", part.label),
+                span.extract_start(),
+            );
+        } else {
+            let bytes = match download_pinned(app, &part.url(), &zip_path, &span) {
+                Ok(n) => n,
+                Err(e) => {
+                    return fail(
+                        app,
+                        &game,
+                        steps,
+                        format!("Download of {} failed: {e}", part.label),
+                    );
+                }
+            };
+            download_total += bytes;
+            steps.push(format!(
+                "Downloaded {} ({})",
+                part.label,
+                friendly_bytes(bytes)
+            ));
+        }
+
+        progress(
+            app,
+            "extract",
+            "Unpacking files…",
+            format!("Unpacking {}", part.label),
+            span.extract_start(),
+        );
+
+        // Straight into the shared tree: extract_zip strips each archive's
+        // "<Repo>-main/" wrapper and merges, so parts that both carry Mods/
+        // combine instead of overwriting one another.
+        if let Err(e) = extract_zip(app, &zip_path, &staging, &span) {
+            return fail(
+                app,
+                &game,
+                steps,
+                format!("Unpack of {} failed: {e}", part.label),
+            );
+        }
+        steps.push(format!("Unpacked {}", part.label));
     }
 
-    let source_root = find_ul_root(&extract_dir).unwrap_or(extract_dir.clone());
+    let download_bytes = Some(download_total);
+    progress(
+        app,
+        "download",
+        "Download complete",
+        friendly_bytes(download_total),
+        84,
+    );
+
+    // Each archive should have merged straight into the staging root. If one
+    // kept its wrapper folder, the parts landed in separate subtrees and a
+    // multi-part package would install only half of itself — fail rather than
+    // quietly ship a broken mod.
+    if !looks_like_ul_root(&staging) {
+        return fail(
+            app,
+            &game,
+            steps,
+            "The download did not unpack into the expected layout. Try Install again, or download \
+             Undead Legacy manually from ul.subquake.com."
+                .into(),
+        );
+    }
+    let source_root = staging.clone();
     steps.push(format!("Package ready: {}", source_root.display()));
 
     // Note: Unity Doorstop uses "doorstop_*" (not "doorstep_*").
     // Missing doorstop_libs → dyld abort: libdoorstop_x64.dylib not found.
     // required=true → install fails if the package omits them (never silent skip).
+    // Each entry REPLACES its destination — install_item deletes first. That is
+    // required, not incidental: the vanilla game ships Mods/0_TFP_Harmony, which
+    // breaks Undead Legacy if it survives alongside it. Merging Mods/ instead of
+    // replacing it would leave the game unplayable, so do not "fix" this.
     let copy_items: &[(&str, bool)] = &[
         ("BepInEx", true),
         ("doorstop_config.ini", true),
@@ -221,7 +321,7 @@ pub fn install_undead_legacy_experimental(
         let resolved = resolve_package_entry(&source_root, name);
         match resolved {
             Some(src) => {
-                if let Err(e) = copy_item(&src, &game.join(name)) {
+                if let Err(e) = install_item(&src, &game.join(name)) {
                     return fail(app, &game, steps, format!("Could not install {name}: {e}"));
                 }
                 steps.push(format!("Installed {name}"));
@@ -240,21 +340,25 @@ pub fn install_undead_legacy_experimental(
         }
     }
 
-    let app_bundle = game.join("7DaysToDie.app");
-    let mods_src = game.join("Mods");
-    if mods_src.is_dir() && app_bundle.is_dir() {
+    // Mods live at the game root only. We launch with the game root as the
+    // working directory and doorstop_config.ini resolves `baseDir = Mods/`
+    // from there, so a second copy inside 7DaysToDie.app is never read — it
+    // just doubled a multi-gigabyte folder. Clear out any left by older
+    // installs.
+    let stale_app_mods = game.join("7DaysToDie.app/Mods");
+    if stale_app_mods.is_dir() {
         progress(
             app,
             "copy",
-            "Finishing Mac setup…",
-            "Copying mods into the game app",
+            "Tidying up…",
+            "Removing a duplicate mods folder from earlier installs",
             97,
         );
-        let app_mods = app_bundle.join("Mods");
-        if let Err(e) = copy_item(&mods_src, &app_mods) {
-            steps.push(format!("Warning: could not copy Mods into app: {e}"));
-        } else {
-            steps.push("Copied Mods into 7DaysToDie.app".into());
+        match fs::remove_dir_all(&stale_app_mods) {
+            Ok(()) => steps.push("Removed duplicate Mods copy inside 7DaysToDie.app".into()),
+            Err(e) => steps.push(format!(
+                "Note: could not remove the duplicate Mods copy: {e}"
+            )),
         }
     }
 
@@ -275,15 +379,7 @@ pub fn install_undead_legacy_experimental(
     }
 
     // Hard requirement for Mac: doorstop injects BepInEx. Without this, dyld aborts on launch.
-    let doorstop_ok = game
-        .join("doorstop_libs")
-        .join("libdoorstop_x64.dylib")
-        .is_file()
-        || game
-            .join("doorstop_libs")
-            .join("libdoorstop_x86.dylib")
-            .is_file();
-    if !doorstop_ok {
+    if find_doorstop(&game).is_none() {
         return fail(
             app,
             &game,
@@ -310,18 +406,28 @@ pub fn install_undead_legacy_experimental(
         .status();
     steps.push("Cleared macOS quarantine flags".into());
 
-    progress(
-        app,
-        "finish",
-        "All set!",
-        "You can press Play now",
-        100,
-    );
+    // Only now that the install has landed: drop the staged tree and the
+    // downloaded archives. Keeping them until this point means a failure
+    // part-way through doesn't cost another multi-gigabyte download.
+    let _ = fs::remove_dir_all(&staging);
+    for index in 0..channel.parts().len() {
+        let _ = fs::remove_file(cache.join(format!("{}-{index}.zip", channel.cache_stem())));
+    }
+
+    progress(app, "finish", "All set!", "You can press Play now", 100);
+
+    let build_ids = channel
+        .parts()
+        .iter()
+        .map(|p| p.build_id())
+        .collect::<Vec<_>>()
+        .join(" + ");
 
     InstallResult {
         ok: true,
-        message: "Success! Press Play — the launcher starts the game for you (no Terminal or scripts needed)."
-            .into(),
+        message: format!(
+            "Success! Press Play — the launcher starts the game for you (no Terminal or scripts needed).\n\nInstalled build: {build_ids}. Everyone on your server must be on this same build."
+        ),
         game_path: game.to_string_lossy().into_owned(),
         steps,
         download_bytes,
@@ -340,17 +446,12 @@ pub fn launch_undead_legacy(game_path_override: Option<String>) -> LaunchResult 
     }
 
     // Pre-flight — friend never fixes this by hand; Install repairs it.
-    let doorstop_x64 = game.join("doorstop_libs/libdoorstop_x64.dylib");
-    let doorstop_x86 = game.join("doorstop_libs/libdoorstop_x86.dylib");
-    let doorstop_lib = if doorstop_x64.is_file() {
-        doorstop_x64
-    } else if doorstop_x86.is_file() {
-        doorstop_x86
-    } else {
+    let Some((doorstop_generation, doorstop_lib)) = find_doorstop(&game) else {
         return LaunchResult {
             ok: false,
-            message: "Can't play yet — install is incomplete. Press Install again to repair, then Play."
-                .into(),
+            message:
+                "Can't play yet — install is incomplete. Press Install again to repair, then Play."
+                    .into(),
             command: String::new(),
         };
     };
@@ -363,11 +464,7 @@ pub fn launch_undead_legacy(game_path_override: Option<String>) -> LaunchResult 
         };
     }
 
-    if !game.join("Mods/UndeadLegacy/UndeadLegacy.dll").is_file()
-        && !game
-            .join("7DaysToDie.app/Mods/UndeadLegacy/UndeadLegacy.dll")
-            .is_file()
-    {
+    if !game.join("Mods/UndeadLegacy/UndeadLegacy.dll").is_file() {
         return LaunchResult {
             ok: false,
             message: "Can't play yet — Undead Legacy files are missing. Press Install again."
@@ -377,9 +474,8 @@ pub fn launch_undead_legacy(game_path_override: Option<String>) -> LaunchResult 
     }
 
     let app_bundle = game.join("7DaysToDie.app");
-    let executable = resolve_mac_executable(&app_bundle).unwrap_or_else(|| {
-        app_bundle.join("Contents/MacOS").join("7 Days To Die")
-    });
+    let executable = resolve_mac_executable(&app_bundle)
+        .unwrap_or_else(|| app_bundle.join("Contents/MacOS").join("7 Days To Die"));
     if !executable.is_file() {
         return LaunchResult {
             ok: false,
@@ -410,6 +506,7 @@ pub fn launch_undead_legacy(game_path_override: Option<String>) -> LaunchResult 
         &doorstop_libs,
         &preloader,
         &config,
+        doorstop_generation,
     ) {
         Ok(cmd_desc) => LaunchResult {
             ok: true,
@@ -426,6 +523,7 @@ pub fn launch_undead_legacy(game_path_override: Option<String>) -> LaunchResult 
                 &doorstop_libs,
                 &preloader,
                 &config,
+                doorstop_generation,
             ) {
                 Ok(cmd_desc) => LaunchResult {
                     ok: true,
@@ -445,6 +543,62 @@ pub fn launch_undead_legacy(game_path_override: Option<String>) -> LaunchResult 
     }
 }
 
+/// Environment that makes Doorstop inject BepInEx.
+///
+/// Doorstop 3 and 4 share almost no variable names — UL 2.6 reads
+/// `DOORSTOP_INVOKE_DLL_PATH`, UL 2.7 reads `DOORSTOP_TARGET_ASSEMBLY`. Getting
+/// this wrong fails *silently*: the game starts clean instead of refusing to
+/// start, so the mod simply never appears. The generation is therefore taken
+/// from the dylib actually on disk rather than assumed.
+fn doorstop_env(
+    generation: Doorstop,
+    preloader: &Path,
+    doorstop_libs: &Path,
+    doorstop_lib: &Path,
+) -> Vec<(String, String)> {
+    let preloader = preloader.display().to_string();
+    let mut env = match generation {
+        Doorstop::V3 => vec![
+            ("DOORSTOP_ENABLE".to_string(), "TRUE".to_string()),
+            ("DOORSTOP_INVOKE_DLL_PATH".to_string(), preloader),
+            (
+                "DOORSTOP_CORLIB_OVERRIDE_PATH".to_string(),
+                "BepInEx/core".to_string(),
+            ),
+        ],
+        Doorstop::V4 => vec![
+            ("DOORSTOP_ENABLED".to_string(), "1".to_string()),
+            // Doorstop 4 does not resolve this relative to the game folder.
+            ("DOORSTOP_TARGET_ASSEMBLY".to_string(), preloader),
+            ("DOORSTOP_IGNORE_DISABLED_ENV".to_string(), "0".to_string()),
+            (
+                "DOORSTOP_MONO_DLL_SEARCH_PATH_OVERRIDE".to_string(),
+                String::new(),
+            ),
+            ("DOORSTOP_MONO_DEBUG_ENABLED".to_string(), "0".to_string()),
+        ],
+    };
+
+    // Injection itself is identical across generations. Absolute paths here,
+    // where run_bepinex.sh leans on DYLD_LIBRARY_PATH to resolve a bare name.
+    let libs = doorstop_libs.display().to_string();
+    env.push(("DYLD_LIBRARY_PATH".to_string(), libs.clone()));
+    env.push((
+        "DYLD_INSERT_LIBRARIES".to_string(),
+        doorstop_lib.display().to_string(),
+    ));
+    env.push(("LD_LIBRARY_PATH".to_string(), libs));
+    env.push((
+        "LD_PRELOAD".to_string(),
+        doorstop_lib
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    env
+}
+
 /// Launch 7DTD with Doorstop injected and `-noeac` so UndeadLegacy.dll loads.
 fn spawn_modded_game(
     game: &Path,
@@ -453,6 +607,7 @@ fn spawn_modded_game(
     doorstop_libs: &Path,
     preloader: &Path,
     config: &Path,
+    generation: Doorstop,
 ) -> Result<String, String> {
     use std::process::Stdio;
 
@@ -464,18 +619,10 @@ fn spawn_modded_game(
 
     let mut cmd = Command::new(executable);
     cmd.current_dir(game);
-    cmd.env("DOORSTOP_ENABLE", "TRUE");
-    cmd.env("DOORSTOP_INVOKE_DLL_PATH", preloader);
-    cmd.env("DOORSTOP_CORLIB_OVERRIDE_PATH", "BepInEx/core");
+    for (key, value) in doorstop_env(generation, preloader, doorstop_libs, doorstop_lib) {
+        cmd.env(key, value);
+    }
     cmd.env_remove("DOORSTOP_DISABLE");
-    // macOS injection (same as run_bepinex.sh, but we own -noeac).
-    cmd.env("DYLD_LIBRARY_PATH", doorstop_libs);
-    cmd.env("DYLD_INSERT_LIBRARIES", doorstop_lib);
-    cmd.env("LD_LIBRARY_PATH", doorstop_libs);
-    cmd.env(
-        "LD_PRELOAD",
-        doorstop_lib.file_name().unwrap_or_default(),
-    );
 
     // Critical: without -noeac the game refuses UndeadLegacy.dll → red XUi/texture spam.
     cmd.arg("-noeac");
@@ -508,7 +655,14 @@ fn spawn_modded_game(
     let still_alive = is_pid_alive(pid);
     if !still_alive {
         let tail = fs::read_to_string(&log_path).unwrap_or_default();
-        let snippet: String = tail.chars().rev().take(800).collect::<String>().chars().rev().collect();
+        let snippet: String = tail
+            .chars()
+            .rev()
+            .take(800)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         return Err(format!(
             "game exited immediately after launch. Last log lines:\n{snippet}"
         ));
@@ -549,22 +703,22 @@ fn spawn_via_terminal_fallback(
     doorstop_libs: &Path,
     preloader: &Path,
     config: &Path,
+    generation: Doorstop,
 ) -> Result<String, String> {
     let game_s = shell_escape(&game.to_string_lossy());
     let exe_s = shell_escape(&executable.to_string_lossy());
-    let lib_s = shell_escape(&doorstop_lib.to_string_lossy());
-    let libs_s = shell_escape(&doorstop_libs.to_string_lossy());
-    let pre_s = shell_escape(&preloader.to_string_lossy());
     let cfg_s = shell_escape(&config.to_string_lossy());
+
+    // Built from the same source as the direct spawn so the two cannot drift.
+    let exports: String = doorstop_env(generation, preloader, doorstop_libs, doorstop_lib)
+        .into_iter()
+        .map(|(key, value)| format!("export {key}={} && ", shell_escape(&value)))
+        .collect();
 
     let inner = format!(
         "cd {game_s} && \
-export DOORSTOP_ENABLE=TRUE && \
-export DOORSTOP_INVOKE_DLL_PATH={pre_s} && \
-export DOORSTOP_CORLIB_OVERRIDE_PATH=BepInEx/core && \
+{exports}\
 unset DOORSTOP_DISABLE && \
-export DYLD_LIBRARY_PATH={libs_s} && \
-export DYLD_INSERT_LIBRARIES={lib_s} && \
 exec {exe_s} -noeac -nogs -configfile={cfg_s}"
     );
 
@@ -603,7 +757,7 @@ fn resolve_mac_executable(app_bundle: &Path) -> Option<PathBuf> {
     Some(app_bundle.join("Contents/MacOS").join(name))
 }
 
-fn fail(app: &AppHandle, game: &Path, steps: Vec<String>, message: String) -> InstallResult {
+fn fail(app: &Progress, game: &Path, steps: Vec<String>, message: String) -> InstallResult {
     progress(app, "error", "Something went wrong", &message, 0);
     InstallResult {
         ok: false,
@@ -614,20 +768,33 @@ fn fail(app: &AppHandle, game: &Path, steps: Vec<String>, message: String) -> In
     }
 }
 
-fn download_first_ok(app: &AppHandle, urls: &[&str], dest: &Path) -> Result<u64, String> {
-    let mut last_err = String::from("no urls");
-    for (i, url) in urls.iter().enumerate() {
-        progress(
-            app,
-            "download",
-            "Downloading Undead Legacy…",
-            format!("Trying download source {} of {}", i + 1, urls.len()),
-            12 + (i as u8 * 2),
-        );
-        match download_file(app, url, dest) {
-            Ok(n) if n > 10_000 => return Ok(n),
+/// Fetch one pinned archive, retrying the same URL on a dropped connection.
+///
+/// There is deliberately no alternate mirror: every other source resolves to
+/// the moving `main` branch, and quietly installing a different build than the
+/// server runs is worse than failing.
+fn download_pinned(app: &Progress, url: &str, dest: &Path, span: &PartSpan) -> Result<u64, String> {
+    let mut last_err = String::from("download did not run");
+    // GitLab ignores Range headers and drops long transfers fairly often, so
+    // each attempt restarts from zero. Retry generously — part 1 is ~3.3 GB.
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        if attempt > 1 {
+            progress(
+                app,
+                "download",
+                "Retrying download…",
+                format!("The connection dropped — attempt {attempt} of {DOWNLOAD_ATTEMPTS}"),
+                span.download_start(),
+            );
+        }
+
+        match download_file(app, url, dest, span) {
+            Ok(n) if n >= MIN_PLAUSIBLE_ARCHIVE_BYTES => return Ok(n),
             Ok(n) => {
-                last_err = format!("Source returned only {n} bytes (likely an error page)");
+                // A tiny body means the URL itself is wrong, not the network.
+                return Err(format!(
+                    "server returned only {n} bytes (an error page, not the mod)"
+                ));
             }
             Err(e) => last_err = e,
         }
@@ -635,7 +802,7 @@ fn download_first_ok(app: &AppHandle, urls: &[&str], dest: &Path) -> Result<u64,
     Err(last_err)
 }
 
-fn download_file(app: &AppHandle, url: &str, dest: &Path) -> Result<u64, String> {
+fn download_file(app: &Progress, url: &str, dest: &Path, span: &PartSpan) -> Result<u64, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("7d2d-mac-launcher/0.1 (clean-room; macOS)")
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -664,9 +831,11 @@ fn download_file(app: &AppHandle, url: &str, dest: &Path) -> Result<u64, String>
         // Throttle UI updates (~every 256 KB)
         if done - last_emit >= 256 * 1024 || total.is_some_and(|t| done >= t) {
             last_emit = done;
+            // GitLab streams archives with no content-length, so an unknown
+            // total is normal here, not a failure.
             let pct = match total {
-                Some(t) if t > 0 => 12 + ((done as f64 / t as f64) * 55.0) as u8,
-                _ => 30,
+                Some(t) if t > 0 => span.download_pct(done as f32 / t as f32),
+                _ => span.download_start(),
             };
             let detail = match total {
                 Some(t) => format!("{} / {}", friendly_bytes(done), friendly_bytes(t)),
@@ -677,7 +846,7 @@ fn download_file(app: &AppHandle, url: &str, dest: &Path) -> Result<u64, String>
                 "download",
                 "Downloading Undead Legacy…",
                 detail,
-                pct.min(67),
+                pct,
                 done,
                 total,
             );
@@ -687,19 +856,71 @@ fn download_file(app: &AppHandle, url: &str, dest: &Path) -> Result<u64, String>
     Ok(done)
 }
 
-fn extract_zip(app: &AppHandle, zip_path: &Path, dest: &Path) -> Result<(), String> {
+/// Size of `path` if it is a complete, readable zip; `None` otherwise.
+///
+/// A truncated download still opens as a file but fails to parse: the zip
+/// central directory lives at the end, so this rejects partial archives.
+fn complete_archive_size(path: &Path) -> Option<u64> {
+    let size = fs::metadata(path).ok()?.len();
+    if size < MIN_PLAUSIBLE_ARCHIVE_BYTES {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    ZipArchive::new(file).ok().map(|_| size)
+}
+
+/// The single top-level directory an archive wraps everything in, if any.
+///
+/// GitLab serves `UndeadLegacyExperimentalPart1-main/…`; stripping that lets
+/// several archives extract straight into one shared tree.
+fn archive_root_prefix(archive: &mut ZipArchive<File>) -> Option<PathBuf> {
+    let mut root: Option<PathBuf> = None;
+    for i in 0..archive.len() {
+        let file = archive.by_index(i).ok()?;
+        let path = file.enclosed_name()?;
+        let first = path.components().next()?.as_os_str();
+        // A file sitting at the top level means there is no wrapper to strip.
+        if path.components().count() == 1 && !file.name().ends_with('/') {
+            return None;
+        }
+        match &root {
+            Some(seen) if seen.as_os_str() != first => return None,
+            Some(_) => {}
+            None => root = Some(PathBuf::from(first)),
+        }
+    }
+    root
+}
+
+/// Unpack `zip_path` into `dest`, merging with whatever is already there.
+fn extract_zip(
+    app: &Progress,
+    zip_path: &Path,
+    dest: &Path,
+    span: &PartSpan,
+) -> Result<(), String> {
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let root_prefix = archive_root_prefix(&mut archive);
     let len = archive.len().max(1);
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-        let outpath = match file.enclosed_name() {
-            Some(p) => dest.join(p),
+        let name = match file.enclosed_name() {
+            Some(p) => p,
             None => continue,
         };
+        let relative = match &root_prefix {
+            Some(prefix) => match name.strip_prefix(prefix) {
+                Ok(stripped) if stripped.as_os_str().is_empty() => continue,
+                Ok(stripped) => stripped.to_path_buf(),
+                Err(_) => name,
+            },
+            None => name,
+        };
+        let outpath = dest.join(relative);
 
         if i % 25 == 0 || i + 1 == len {
-            let pct = 70 + ((i as f64 / len as f64) * 14.0) as u8;
+            let pct = span.extract_pct(i as f32 / len as f32);
             let name = file.name().to_string();
             let short = name.rsplit('/').next().unwrap_or(&name);
             progress(
@@ -707,7 +928,7 @@ fn extract_zip(app: &AppHandle, zip_path: &Path, dest: &Path) -> Result<(), Stri
                 "extract",
                 "Unpacking files…",
                 format!("{}/{} · {short}", i + 1, len),
-                pct.min(84),
+                pct,
             );
         }
 
@@ -747,27 +968,77 @@ fn resolve_package_entry(source_root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn find_ul_root(extract_dir: &Path) -> Option<PathBuf> {
-    if extract_dir.join("BepInEx").exists()
-        || extract_dir.join("Mods").exists()
-        || extract_dir.join("run_bepinex.sh").exists()
-    {
-        return Some(extract_dir.to_path_buf());
-    }
-    for entry in WalkDir::new(extract_dir).max_depth(3) {
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_dir() {
-            continue;
-        }
-        let p = entry.path();
-        if p.join("BepInEx").exists()
-            || p.join("run_bepinex.sh").exists()
-            || (p.join("Mods").exists() && p.join("doorstep_config.ini").exists())
-        {
-            return Some(p.to_path_buf());
+/// Progress percentages carved up between a channel's parts, so a two-archive
+/// install advances smoothly instead of restarting the bar for each one.
+pub struct PartSpan {
+    index: usize,
+    count: usize,
+}
+
+impl PartSpan {
+    pub fn new(index: usize, count: usize) -> Self {
+        Self {
+            index,
+            count: count.max(1),
         }
     }
-    None
+
+    /// Downloads occupy 10..70, extraction 70..84.
+    fn slice(&self, from: f32, to: f32) -> (f32, f32) {
+        let width = (to - from) / self.count as f32;
+        let start = from + width * self.index as f32;
+        (start, start + width)
+    }
+
+    fn download_start(&self) -> u8 {
+        self.slice(10.0, 70.0).0 as u8
+    }
+
+    fn extract_start(&self) -> u8 {
+        self.slice(70.0, 84.0).0 as u8
+    }
+
+    /// Map this part's extraction progress (0.0..1.0) onto the overall bar.
+    fn extract_pct(&self, fraction: f32) -> u8 {
+        let (start, end) = self.slice(70.0, 84.0);
+        (start + (end - start) * fraction.clamp(0.0, 1.0)) as u8
+    }
+
+    /// Map this part's download completion (0.0..1.0) onto the overall bar.
+    fn download_pct(&self, fraction: f32) -> u8 {
+        let (start, end) = self.slice(10.0, 70.0);
+        (start + (end - start) * fraction.clamp(0.0, 1.0)) as u8
+    }
+}
+
+/// Does this directory look like the root of a UL package?
+///
+/// Part 2 of the experimental package carries nothing but `Mods/`, so a
+/// bare `Mods` directory has to count on its own.
+fn looks_like_ul_root(p: &Path) -> bool {
+    p.join("BepInEx").exists() || p.join("run_bepinex.sh").exists() || p.join("Mods").exists()
+}
+
+/// Install one staged entry into the game folder.
+///
+/// The staging tree is disposable, so a rename is preferred: it is instant and
+/// needs no extra space, which matters when the package is several gigabytes.
+/// Falls back to copying when the cache and the game sit on different volumes.
+fn install_item(src: &Path, dest: &Path) -> io::Result<()> {
+    if dest.exists() {
+        if dest.is_dir() {
+            fs::remove_dir_all(dest)?;
+        } else {
+            fs::remove_file(dest)?;
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(_) => copy_item(src, dest),
+    }
 }
 
 fn copy_item(src: &Path, dest: &Path) -> io::Result<()> {
@@ -816,5 +1087,188 @@ fn friendly_bytes(n: u64) -> String {
         format!("{:.0} KB", n / KB)
     } else {
         format!("{n:.0} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_of(generation: Doorstop) -> Vec<(String, String)> {
+        doorstop_env(
+            generation,
+            Path::new("/game/BepInEx/core/BepInEx.Preloader.dll"),
+            Path::new("/game/doorstop_libs"),
+            Path::new("/game/doorstop_libs/libdoorstop.dylib"),
+        )
+    }
+
+    fn get(env: &[(String, String)], key: &str) -> Option<String> {
+        env.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn v4_uses_doorstop4_variable_names() {
+        let env = env_of(Doorstop::V4);
+        assert_eq!(get(&env, "DOORSTOP_ENABLED").as_deref(), Some("1"));
+        assert_eq!(
+            get(&env, "DOORSTOP_TARGET_ASSEMBLY").as_deref(),
+            Some("/game/BepInEx/core/BepInEx.Preloader.dll")
+        );
+        // The Doorstop 3 spelling must not leak through, or 2.7 launches vanilla.
+        assert!(get(&env, "DOORSTOP_INVOKE_DLL_PATH").is_none());
+        assert!(get(&env, "DOORSTOP_ENABLE").is_none());
+    }
+
+    #[test]
+    fn v3_uses_doorstop3_variable_names() {
+        let env = env_of(Doorstop::V3);
+        assert_eq!(get(&env, "DOORSTOP_ENABLE").as_deref(), Some("TRUE"));
+        assert_eq!(
+            get(&env, "DOORSTOP_INVOKE_DLL_PATH").as_deref(),
+            Some("/game/BepInEx/core/BepInEx.Preloader.dll")
+        );
+        assert!(get(&env, "DOORSTOP_TARGET_ASSEMBLY").is_none());
+        assert!(get(&env, "DOORSTOP_ENABLED").is_none());
+    }
+
+    /// The generations must not accidentally converge on a shared spelling —
+    /// that is precisely the bug that makes the mod silently not load.
+    #[test]
+    fn generations_share_no_doorstop_variable() {
+        let v3: Vec<String> = env_of(Doorstop::V3)
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with("DOORSTOP_"))
+            .collect();
+        let v4: Vec<String> = env_of(Doorstop::V4)
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with("DOORSTOP_"))
+            .collect();
+        for key in &v3 {
+            assert!(!v4.contains(key), "{key} set by both generations");
+        }
+    }
+
+    #[test]
+    fn both_generations_inject_the_dylib_by_absolute_path() {
+        for generation in [Doorstop::V3, Doorstop::V4] {
+            let env = env_of(generation);
+            assert_eq!(
+                get(&env, "DYLD_INSERT_LIBRARIES").as_deref(),
+                Some("/game/doorstop_libs/libdoorstop.dylib")
+            );
+            assert_eq!(
+                get(&env, "DYLD_LIBRARY_PATH").as_deref(),
+                Some("/game/doorstop_libs")
+            );
+        }
+    }
+
+    #[test]
+    fn single_part_spans_the_whole_bar() {
+        let span = PartSpan::new(0, 1);
+        assert_eq!(span.download_pct(0.0), 10);
+        assert_eq!(span.download_pct(1.0), 70);
+    }
+
+    #[test]
+    fn two_parts_split_the_bar_without_overlapping() {
+        let first = PartSpan::new(0, 2);
+        let second = PartSpan::new(1, 2);
+        assert_eq!(first.download_pct(0.0), 10);
+        assert_eq!(first.download_pct(1.0), 40);
+        assert_eq!(second.download_pct(0.0), 40);
+        assert_eq!(second.download_pct(1.0), 70);
+        assert!(second.extract_start() >= first.extract_start());
+    }
+
+    #[test]
+    fn progress_never_runs_backwards_or_past_its_stage() {
+        for index in 0..2 {
+            let span = PartSpan::new(index, 2);
+            assert!(span.download_pct(0.0) >= 10);
+            assert!(span.download_pct(1.0) <= 70);
+            assert!(span.extract_pct(1.0) <= 84);
+            // Out-of-range fractions are clamped, not wrapped.
+            assert_eq!(span.download_pct(-1.0), span.download_pct(0.0));
+            assert_eq!(span.download_pct(9.0), span.download_pct(1.0));
+        }
+    }
+
+    #[test]
+    fn a_bare_mods_folder_counts_as_a_package_root() {
+        // Part 2 of the experimental package contains nothing else.
+        let dir = std::env::temp_dir().join("ul-test-part2-root");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Mods")).unwrap();
+        assert!(looks_like_ul_root(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Full install against the live Subquake/GitLab archives.
+    ///
+    /// Downloads a few hundred megabytes, so it is ignored by default:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored --nocapture
+    ///
+    /// This is the only check that exercises the real URLs, the archive
+    /// root-strip, the two-part merge and the rename-install together.
+    #[test]
+    #[ignore = "downloads the real Undead Legacy package"]
+    fn installs_experimental_from_the_real_archives() {
+        let game = std::env::temp_dir().join("ul-e2e-game");
+        let _ = fs::remove_dir_all(&game);
+        // detect_game only requires a 7DaysToDie.app directory to consider the
+        // game present; `force` skips the version gate for this fake root.
+        fs::create_dir_all(game.join("7DaysToDie.app/Contents/MacOS")).unwrap();
+
+        let result = install_undead_legacy(
+            &Progress::silent(),
+            Channel::Experimental,
+            Some(game.to_string_lossy().into_owned()),
+            true,
+        );
+        assert!(
+            result.ok,
+            "install failed: {}\nsteps: {:#?}",
+            result.message, result.steps
+        );
+
+        // Part 1 payload.
+        assert!(game.join("BepInEx/core/BepInEx.Preloader.dll").is_file());
+        assert!(game.join("doorstop_libs/libdoorstop.dylib").is_file());
+        assert!(game.join("Mods/UndeadLegacy/UndeadLegacy.dll").is_file());
+        assert!(game.join("run_bepinex.sh").is_file());
+
+        // The merge proof: these three .ulm files live in *different* archives,
+        // and all must survive. A destructive per-directory copy would drop one
+        // side, because both parts populate Mods/UndeadLegacy/Resources.
+        let resources = game.join("Mods/UndeadLegacy/Resources");
+        assert!(
+            resources.join("Subquake_Core.ulm").is_file(),
+            "part 1 resource missing — part 2 overwrote part 1"
+        );
+        for from_part_two in ["Subquake_Items.ulm", "Subquake_Power.ulm"] {
+            assert!(
+                resources.join(from_part_two).is_file(),
+                "part 2 resource {from_part_two} missing — parts did not merge"
+            );
+        }
+
+        // The installed package must be launchable as Doorstop 4.
+        let (generation, _) = find_doorstop(&game).expect("doorstop not detected");
+        assert_eq!(generation, Doorstop::V4);
+
+        // Staging must not be left behind.
+        let staging = dirs::cache_dir()
+            .unwrap()
+            .join("7d2d-mac-launcher")
+            .join(format!("{}-staging", Channel::Experimental.cache_stem()));
+        assert!(!staging.exists(), "staging tree left in the cache");
+
+        let _ = fs::remove_dir_all(&game);
     }
 }

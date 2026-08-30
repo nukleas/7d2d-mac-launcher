@@ -9,7 +9,8 @@ type GameInfo = {
   betaKey: string | null;
   name: string | null;
   sizeOnDiskBytes: number | null;
-  looksLikeA20: boolean;
+  gameLine: "a20" | "v26" | "unsupported" | "updating" | "unknown";
+  suggestedChannel: Channel | null;
   hasBepinex: boolean;
   hasRunBepinex: boolean;
   hasDoorstop: boolean;
@@ -48,7 +49,37 @@ type ProgressEvent = {
   indeterminate: boolean;
 };
 
+type Channel = "stable" | "experimental";
+
+/// Kept in step with channel.rs — the Rust side owns the real requirements.
+const CHANNELS: Record<Channel, { ul: string; game: string; branch: string; freeGb: number }> = {
+  stable: {
+    ul: "Undead Legacy 2.6 (stable)",
+    game: "Alpha 20.7",
+    branch: "alpha20.7",
+    freeGb: 5,
+  },
+  experimental: {
+    ul: "Undead Legacy 2.7 (experimental)",
+    game: "v2.6",
+    branch: "v2.6",
+    freeGb: 14,
+  },
+};
+
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T | null;
+
+/// What the user picked, or the channel matching the installed game.
+let channel: Channel = "experimental";
+let channelLocked = false;
+
+function currentChannel(): Channel {
+  return channel;
+}
+
+function channelMatchesGame(info: GameInfo): boolean {
+  return info.suggestedChannel === currentChannel();
+}
 
 let installing = false;
 let unlistenProgress: UnlistenFn | null = null;
@@ -87,18 +118,20 @@ function setChips(info: GameInfo, freeGb: number | null) {
     text: info.found ? "Game found" : "Game missing",
     cls: info.found ? "ok" : "bad",
   });
+  const spec = CHANNELS[currentChannel()];
+  const matches = channelMatchesGame(info);
   chips.push({
     text: info.betaKey ? `Beta: ${info.betaKey}` : "Beta: default",
-    cls: info.looksLikeA20 ? "ok" : info.found ? "warn" : "bad",
+    cls: matches ? "ok" : info.found ? "warn" : "bad",
   });
   chips.push({
-    text: info.looksLikeA20 ? "A20.7 ready" : "Needs alpha20.7",
-    cls: info.looksLikeA20 ? "ok" : "warn",
+    text: matches ? `${spec.game} ready` : `Needs game ${spec.game}`,
+    cls: matches ? "ok" : "warn",
   });
   if (freeGb != null) {
     chips.push({
       text: `${freeGb.toFixed(1)} GB free`,
-      cls: freeGb >= 2 ? "ok" : "bad",
+      cls: freeGb >= spec.freeGb ? "ok" : "bad",
     });
   }
   if (info.modReady) {
@@ -120,9 +153,12 @@ function setChecklist(info: GameInfo, freeGb: number | null) {
     el.classList.toggle("ok", ok);
     el.classList.toggle("bad", !ok);
   };
+  const spec = CHANNELS[currentChannel()];
+  if (beta) beta.innerHTML = `Steam beta set to <strong>${spec.branch}</strong>`;
+  if (space) space.textContent = `About ${spec.freeGb} GB free space to download and unpack`;
   mark(steam, info.found);
-  mark(beta, info.looksLikeA20);
-  mark(space, freeGb == null ? true : freeGb >= 2);
+  mark(beta, channelMatchesGame(info));
+  mark(space, freeGb == null ? true : freeGb >= spec.freeGb);
 }
 
 function setProgressVisible(show: boolean) {
@@ -222,6 +258,14 @@ async function refreshGame() {
       invoke<GameInfo>("get_game_info", { path: pathOverride() }),
       refreshDisk(),
     ]);
+    if (!channelLocked && info.suggestedChannel && info.suggestedChannel !== channel) {
+      channel = info.suggestedChannel;
+      const radio = document.querySelector<HTMLInputElement>(
+        `input[name="ul-channel"][value="${channel}"]`,
+      );
+      if (radio) radio.checked = true;
+    }
+
     const betaEl = $("#stat-beta .stat-value");
     if (betaEl) betaEl.textContent = info.betaKey || "default";
 
@@ -243,12 +287,23 @@ async function refreshGame() {
       return;
     }
 
-    if (!info.looksLikeA20) {
-      setReady(
-        "warn",
-        "Game found — needs Alpha 20.7",
-        "In Steam: right-click 7 Days to Die → Properties → Betas → choose alpha20.7, wait for it to finish updating, then Refresh.",
-      );
+    if (!channelMatchesGame(info)) {
+      const spec = CHANNELS[currentChannel()];
+      if (info.gameLine === "updating") {
+        // Steam flips the branch instantly but the files take a long download.
+        // Installing in between puts the mod on the wrong game generation.
+        setReady(
+          "warn",
+          "Steam is still downloading the game",
+          `The ${spec.branch} branch is selected, but the game files on disk are still the old version. Wait for Steam to finish, then press Check again.`,
+        );
+      } else {
+        setReady(
+          "warn",
+          `Game found — ${spec.ul} needs game ${spec.game}`,
+          `In Steam: right-click 7 Days to Die → Properties → Betas → ${spec.branch}, wait for it to finish updating, then Refresh.`,
+        );
+      }
       if (launch) launch.disabled = !(info.hasBepinex || info.hasRunBepinex);
       if (install) install.disabled = false;
       setStep(1, 0);
@@ -310,7 +365,8 @@ async function installUl() {
   const force = $<HTMLInputElement>("#force-install")?.checked ?? false;
 
   try {
-    const result = await invoke<InstallResult>("install_ul_experimental", {
+    const result = await invoke<InstallResult>("install_ul", {
+      channel: currentChannel(),
       path: pathOverride(),
       force,
     });
@@ -367,6 +423,15 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#btn-install")?.addEventListener("click", () => void installUl());
   $("#btn-launch")?.addEventListener("click", () => void launchUl());
   $("#game-path")?.addEventListener("change", () => void refreshGame());
+  document.querySelectorAll<HTMLInputElement>('input[name="ul-channel"]').forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (!radio.checked) return;
+      channel = radio.value as Channel;
+      // An explicit pick sticks, even if it disagrees with what is installed.
+      channelLocked = true;
+      void refreshGame();
+    });
+  });
 
   void listen<ProgressEvent>("install-progress", (event) => {
     applyProgress(event.payload);

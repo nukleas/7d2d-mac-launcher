@@ -19,50 +19,68 @@ pub struct ProgressEvent {
     pub indeterminate: bool,
 }
 
-pub fn emit_progress(app: &AppHandle, event: ProgressEvent) {
-    let _ = app.emit("install-progress", event);
+/// Where install progress goes.
+///
+/// The install pipeline is long-running and worth testing end to end, which it
+/// cannot be if every step needs a live Tauri app. A silent sink lets the real
+/// download/unpack/install run headless.
+#[derive(Clone, Default)]
+pub struct Progress {
+    app: Option<AppHandle>,
+}
+
+impl Progress {
+    pub fn to_app(app: AppHandle) -> Self {
+        Self { app: Some(app) }
+    }
+
+    /// Discards events, so the install pipeline can run headless under test.
+    #[cfg(test)]
+    pub fn silent() -> Self {
+        Self { app: None }
+    }
+
+    pub fn emit(&self, event: ProgressEvent) {
+        if let Some(app) = &self.app {
+            let _ = app.emit("install-progress", event);
+        }
+    }
 }
 
 pub fn progress(
-    app: &AppHandle,
+    app: &Progress,
     stage: &str,
-    title: &str,
+    title: impl Into<String>,
     detail: impl Into<String>,
     percent: u8,
 ) {
-    emit_progress(
-        app,
-        ProgressEvent {
-            stage: stage.into(),
-            title: title.into(),
-            detail: detail.into(),
-            percent: percent.min(100),
-            bytes_done: None,
-            bytes_total: None,
-            indeterminate: false,
-        },
-    );
+    app.emit(ProgressEvent {
+        stage: stage.into(),
+        title: title.into(),
+        detail: detail.into(),
+        percent: percent.min(100),
+        bytes_done: None,
+        bytes_total: None,
+        indeterminate: false,
+    });
 }
 
 pub fn progress_bytes(
-    app: &AppHandle,
+    app: &Progress,
     stage: &str,
-    title: &str,
+    title: impl Into<String>,
     detail: impl Into<String>,
     percent: u8,
     done: u64,
     total: Option<u64>,
 ) {
-    emit_progress(
-        app,
-        ProgressEvent {
-            stage: stage.into(),
-            title: title.into(),
-            detail: detail.into(),
-            percent: percent.min(100),
-            bytes_done: Some(done),
-            bytes_total: total,
-            indeterminate: total.is_none(),
-        },
-    );
+    app.emit(ProgressEvent {
+        stage: stage.into(),
+        title: title.into(),
+        detail: detail.into(),
+        percent: percent.min(100),
+        bytes_done: Some(done),
+        bytes_total: total,
+        indeterminate: total.is_none(),
+    });
 }
