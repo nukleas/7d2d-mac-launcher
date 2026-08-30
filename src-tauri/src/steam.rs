@@ -264,6 +264,7 @@ pub fn free_space_bytes(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const A20_PLIST: &str = "Unity Player version 2020.3.14f1 (d0d1bb862f9d).";
     const V2_PLIST: &str = "Unity Player version 2022.3.29f1 (8d91ffdec66b).";
@@ -277,10 +278,18 @@ mod tests {
         }
     }
 
+    /// A throwaway game folder, optionally containing an `Info.plist`.
+    ///
+    /// The directory name must be unique per call. Naming it after the plist
+    /// (or its length) collides: the two plist constants are the same length,
+    /// and separate tests reuse the same content — so parallel tests would
+    /// share a directory and `remove_dir_all` one another's fixture mid-run.
     fn game_with(plist: Option<&str>) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "ul-line-test-{}",
-            plist.map(|p| p.len()).unwrap_or(0)
+            "ul-line-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&dir);
         let app = dir.join("7DaysToDie.app/Contents");
