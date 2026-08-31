@@ -57,19 +57,28 @@ bun run package
 PKG_EC=$?
 set -e
 
-APP="$ROOT/src-tauri/target/release/bundle/macos/${PRODUCT}.app"
+APP="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle/macos/${PRODUCT}.app"
 if [[ ! -d "$APP" ]]; then
   echo "error: app not built (package exit $PKG_EC)" >&2
   exit 1
 fi
 echo "    package exit code: $PKG_EC (app present)"
 
+echo "==> Verify the binary is universal (Intel + Apple Silicon)…"
+BIN="$APP/Contents/MacOS/seven_days_mac_launcher"
+ARCHS="$(lipo -archs "$BIN" 2>/dev/null || true)"
+echo "    archs: $ARCHS"
+case "$ARCHS" in
+  *x86_64*arm64*|*arm64*x86_64*) ;;
+  *) echo "error: not a universal binary ($ARCHS) — Intel Macs could not run this" >&2; exit 1 ;;
+esac
+
 echo "==> Deep re-sign…"
 codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP"
 codesign --verify --verbose=2 "$APP"
 
 echo "==> Notarize .app…"
-APP_ZIP="$ROOT/src-tauri/target/release/bundle/macos/${PRODUCT}-notarize.zip"
+APP_ZIP="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle/macos/${PRODUCT}-notarize.zip"
 rm -f "$APP_ZIP"
 ditto -c -k --keepParent "$APP" "$APP_ZIP"
 xcrun notarytool submit "$APP_ZIP" --keychain-profile "$PROFILE" --wait
@@ -78,8 +87,8 @@ xcrun stapler validate "$APP"
 rm -f "$APP_ZIP"
 
 echo "==> Rebuild + notarize DMG from stapled app…"
-mkdir -p "$ROOT/src-tauri/target/release/bundle/dmg"
-DMG="$ROOT/src-tauri/target/release/bundle/dmg/${PRODUCT}_${VERSION}_aarch64.dmg"
+mkdir -p "$ROOT/src-tauri/target/universal-apple-darwin/release/bundle/dmg"
+DMG="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle/dmg/${PRODUCT}_${VERSION}_universal.dmg"
 STAGE=$(mktemp -d)
 ditto "$APP" "$STAGE/${PRODUCT}.app"
 rm -f "$DMG"

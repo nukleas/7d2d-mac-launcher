@@ -17,6 +17,7 @@ Built for people who just want to play (and for friends who should never have to
 | Sequoia “app is damaged” | Release zip includes **Open Me First** quarantine fix |
 | Self-update restart loop | No self-updater; only the *build list* is fetched at run time |
 | Leaves a ~30 GB cloned `Alpha20/` behind | Installs in place; nothing to clean up |
+| Copies `Mods/` into the app bundle (3.4 GB) | Symlinked — the asset loader needs the path, not a second copy |
 
 ## Release channels
 
@@ -64,7 +65,7 @@ See [FRIEND-SETUP.md](./FRIEND-SETUP.md).
 
 ## Develop
 
-**Requirements:** macOS 11+, [Rust](https://rustup.rs/), [Bun](https://bun.sh/) (or npm), Xcode CLT, Steam + 7DTD.
+**Requirements:** macOS 11+ (Intel or Apple Silicon — the release is a universal binary), [Rust](https://rustup.rs/), [Bun](https://bun.sh/) (or npm), Xcode CLT, Steam + 7DTD.
 
 ```bash
 git clone https://github.com/nukleas/7d2d-mac-launcher.git

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0
+
+### Fixed
+- **No sound, and a thousand asset errors.** 0.3.0 deleted `Mods` from inside
+  `7DaysToDie.app`, on the evidence that the game writes `ModSettings.ini` to the
+  copy at the game root. That was true but incomplete: the *mod loader* reads the
+  game root, while the *asset-bundle loader* builds its path from the app
+  bundle's `Data` directory and lands inside `7DaysToDie.app`. Removing that
+  folder left every `.ulm` failing with "Parent folder not found" — 1095 of them
+  in one session, mostly `Subquake_Sounds.ulm`, so no music.
+
+  It is now a **symlink** rather than the 3.4 GB duplicate 0.2.0 copied in: same
+  path resolution, no extra disk, and it cannot drift from the real folder.
+
+  This is macOS-specific. On Windows and Linux the executable sits at the game
+  root, so the same path arithmetic already lands in the right place.
+
+### Added
+- **Universal binary** — Intel Macs are supported again. The release script
+  refuses to publish a build that isn't both `x86_64` and `arm64`.
+- The game is launched with `-logfile`, so its structured log is captured
+  alongside the launcher's stdout. Without it the only usable diagnostics came
+  from BepInEx's own log, which made us harder to support than the game's own
+  launcher.
+
 ## Unreleased
 
 ### Features
