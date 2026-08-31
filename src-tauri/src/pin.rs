@@ -309,6 +309,29 @@ mod tests {
         }
     }
 
+    /// Hits the network: proves a shipped build can actually reach and accept
+    /// the published list. If the URL, branch or filename ever breaks, every
+    /// client silently falls back to its built-in pins forever and mod updates
+    /// stop reaching anyone — with no error to notice.
+    ///
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored resolve_
+    #[test]
+    #[ignore = "requires network"]
+    fn resolve_reaches_the_published_list() {
+        for ch in [Channel::Stable, Channel::Experimental] {
+            let (parts, source) = resolve(ch);
+            assert_eq!(
+                source,
+                PinSource::Published,
+                "{ch:?} fell back to built-in pins — the published list is unreachable or rejected"
+            );
+            assert!(!parts.is_empty());
+            for p in &parts {
+                assert!(is_hex(&p.sha, 40));
+            }
+        }
+    }
+
     #[test]
     fn pin_source_is_reportable() {
         assert_ne!(
