@@ -2,6 +2,7 @@
 
 use crate::channel::{Channel, Doorstop};
 use crate::paths::expand_user_path;
+use crate::pin::{self, PinnedPart};
 use crate::progress::{progress, progress_bytes, Progress};
 use crate::steam::{detect_game, find_doorstop, free_space_bytes, game_root_from_info};
 use serde::Serialize;
@@ -23,6 +24,10 @@ const MIN_PLAUSIBLE_ARCHIVE_BYTES: u64 = 1_000_000;
 /// GitLab streams archives without a content-length and sometimes drops the
 /// connection partway through a few-hundred-megabyte transfer.
 const DOWNLOAD_ATTEMPTS: u32 = 4;
+
+/// Position of the private mirror in `Channel::sources` — second, after
+/// GitLab. Only a download from here has a digest we can check against.
+const MIRROR_SOURCE_INDEX: usize = 1;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,7 +186,18 @@ pub fn install_undead_legacy(
         );
     }
 
-    let parts = channel.parts();
+    // Which build to install is resolved at run time, so a mod bump reaches
+    // everyone without reissuing the app. Falls back to the compiled-in pins.
+    let (parts, pin_source) = pin::resolve(channel);
+    steps.push(format!("Build list: {}", pin_source.describe()));
+    progress(
+        app,
+        "check",
+        "Checking which build to install…",
+        pin_source.describe(),
+        9,
+    );
+    let parts: &[PinnedPart] = &parts;
     let mut download_total: u64 = 0;
 
     for (index, part) in parts.iter().enumerate() {
@@ -205,6 +221,7 @@ pub fn install_undead_legacy(
         ));
 
         let zip_path = cache.join(format!("{}-{index}.zip", channel.cache_stem()));
+        let mut from_mirror = false;
 
         // GitLab ignores Range headers, so a dropped transfer restarts from
         // zero — and part 1 is gigabytes. A complete archive from an earlier
@@ -224,23 +241,76 @@ pub fn install_undead_legacy(
                 span.extract_start(),
             );
         } else {
-            let bytes = match download_pinned(app, &part.url(), &zip_path, &span) {
-                Ok(n) => n,
+            let (bytes, source_used) =
+                match download_pinned(app, &sources_for(channel, part, index), &zip_path, &span) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        return fail(
+                            app,
+                            &game,
+                            steps,
+                            format!("Download of {} failed: {e}", part.label),
+                        );
+                    }
+                };
+            download_total += bytes;
+            steps.push(format!(
+                "Downloaded {} ({}) from {}",
+                part.label,
+                friendly_bytes(bytes),
+                if source_used == MIRROR_SOURCE_INDEX {
+                    "the local mirror"
+                } else {
+                    "gitlab.com"
+                }
+            ));
+            from_mirror = source_used == MIRROR_SOURCE_INDEX;
+        }
+
+        // Verify the mirror's copy against its recorded digest. This only
+        // applies to a fresh mirror download: GitLab's archives are generated
+        // per request and not byte-reproducible, so no fixed digest can
+        // describe them, and a cached file's origin is no longer known. Catches
+        // a mirror left holding a stale build after a version bump — which
+        // would otherwise be an install that silently can't join the server.
+        if let (true, Some(expected)) = (from_mirror, part.mirror_sha256.as_deref()) {
+            progress(
+                app,
+                "extract",
+                "Checking the download…",
+                format!("Verifying {}", part.label),
+                span.extract_start(),
+            );
+            match file_digest(&zip_path) {
+                Ok(actual) if actual == expected => {
+                    steps.push(format!("Verified {} ({})", part.label, &actual[..12]));
+                }
+                Ok(actual) => {
+                    // Drop it so the next attempt re-fetches rather than
+                    // reusing a file we've just proven wrong.
+                    let _ = fs::remove_file(&zip_path);
+                    return fail(
+                        app,
+                        &game,
+                        steps,
+                        format!(
+                            "{} downloaded incorrectly — its checksum doesn't match the expected build \
+                             (got {}…, expected {}…). It has been discarded; press Install again.",
+                            part.label,
+                            &actual[..12],
+                            &expected[..12]
+                        ),
+                    );
+                }
                 Err(e) => {
                     return fail(
                         app,
                         &game,
                         steps,
-                        format!("Download of {} failed: {e}", part.label),
+                        format!("Could not verify {}: {e}", part.label),
                     );
                 }
-            };
-            download_total += bytes;
-            steps.push(format!(
-                "Downloaded {} ({})",
-                part.label,
-                friendly_bytes(bytes)
-            ));
+            }
         }
 
         progress(
@@ -327,12 +397,19 @@ pub fn install_undead_legacy(
                 steps.push(format!("Installed {name}"));
             }
             None if *required => {
+                // Name the folder we actually looked in. Reported as "a file
+                // was missing but it was totally there", because the reader
+                // checks their *game* folder while this is about the freshly
+                // downloaded package — two different directories.
                 return fail(
                     app,
                     &game,
                     steps,
                     format!(
-                        "The download is missing required file “{name}”. Try Install again, or download UL from ul.subquake.com."
+                        "The downloaded Undead Legacy package is incomplete — “{name}” isn't in it. \
+                         (This is about the download, not your game folder. Looked in {}.) \
+                         The download was probably cut short: press Install again to re-fetch it.",
+                        source_root.display()
                     ),
                 );
             }
@@ -410,14 +487,13 @@ pub fn install_undead_legacy(
     // downloaded archives. Keeping them until this point means a failure
     // part-way through doesn't cost another multi-gigabyte download.
     let _ = fs::remove_dir_all(&staging);
-    for index in 0..channel.parts().len() {
+    for index in 0..parts.len() {
         let _ = fs::remove_file(cache.join(format!("{}-{index}.zip", channel.cache_stem())));
     }
 
     progress(app, "finish", "All set!", "You can press Play now", 100);
 
-    let build_ids = channel
-        .parts()
+    let build_ids = parts
         .iter()
         .map(|p| p.build_id())
         .collect::<Vec<_>>()
@@ -768,38 +844,82 @@ fn fail(app: &Progress, game: &Path, steps: Vec<String>, message: String) -> Ins
     }
 }
 
-/// Fetch one pinned archive, retrying the same URL on a dropped connection.
+/// Fetch one pinned archive, trying each source in turn.
 ///
-/// There is deliberately no alternate mirror: every other source resolves to
-/// the moving `main` branch, and quietly installing a different build than the
-/// server runs is worse than failing.
-fn download_pinned(app: &Progress, url: &str, dest: &Path, span: &PartSpan) -> Result<u64, String> {
+/// Multiple sources are only safe because the result is checksum-verified by
+/// the caller: whichever host answers, the bytes are proven to be the pinned
+/// build before anything is installed.
+fn download_pinned(
+    app: &Progress,
+    sources: &[String],
+    dest: &Path,
+    span: &PartSpan,
+) -> Result<(u64, usize), String> {
     let mut last_err = String::from("download did not run");
-    // GitLab ignores Range headers and drops long transfers fairly often, so
-    // each attempt restarts from zero. Retry generously — part 1 is ~3.3 GB.
-    for attempt in 1..=DOWNLOAD_ATTEMPTS {
-        if attempt > 1 {
+    for (i, url) in sources.iter().enumerate() {
+        if i > 0 {
             progress(
                 app,
                 "download",
-                "Retrying download…",
-                format!("The connection dropped — attempt {attempt} of {DOWNLOAD_ATTEMPTS}"),
+                "Trying another source…",
+                format!("Source {} of {}", i + 1, sources.len()),
                 span.download_start(),
             );
+            // A partial from a source that turned out to be unreachable is not
+            // resumable against a different host.
+            let _ = fs::remove_file(dest);
         }
-
-        match download_file(app, url, dest, span) {
-            Ok(n) if n >= MIN_PLAUSIBLE_ARCHIVE_BYTES => return Ok(n),
-            Ok(n) => {
-                // A tiny body means the URL itself is wrong, not the network.
-                return Err(format!(
-                    "server returned only {n} bytes (an error page, not the mod)"
-                ));
+        for attempt in 1..=DOWNLOAD_ATTEMPTS {
+            if attempt > 1 {
+                progress(
+                    app,
+                    "download",
+                    "Retrying download…",
+                    format!("The connection dropped — attempt {attempt} of {DOWNLOAD_ATTEMPTS}"),
+                    span.download_start(),
+                );
             }
-            Err(e) => last_err = e,
+            match download_file(app, url, dest, span) {
+                Ok(n) if n >= MIN_PLAUSIBLE_ARCHIVE_BYTES => return Ok((n, i)),
+                Ok(n) => {
+                    last_err =
+                        format!("source returned only {n} bytes (an error page, not the mod)");
+                    break;
+                }
+                Err(e) => last_err = e,
+            }
         }
     }
     Err(last_err)
+}
+
+/// Where to fetch one part from, best first.
+///
+/// GitLab leads on speed; the private mirror follows as the resumable retry,
+/// and is only offered when the manifest published a digest for it — an
+/// unverifiable mirror is worse than no mirror.
+fn sources_for(channel: Channel, part: &PinnedPart, index: usize) -> Vec<String> {
+    let mut sources = vec![part.url()];
+    if part.mirror_sha256.is_some() {
+        sources.push(channel.mirror_url(index));
+    }
+    sources
+}
+
+/// SHA-256 of a file, streamed so a multi-gigabyte archive never lands in RAM.
+fn file_digest(path: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn download_file(app: &Progress, url: &str, dest: &Path, span: &PartSpan) -> Result<u64, String> {
@@ -809,16 +929,48 @@ fn download_file(app: &Progress, url: &str, dest: &Path, span: &PartSpan) -> Res
         .build()
         .map_err(|e| e.to_string())?;
 
-    let mut resp = client.get(url).send().map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
+    // Resume where a previous attempt stopped, if the server allows it. The
+    // private mirror answers 206; GitLab ignores Range and answers 200, in
+    // which case we start over — so this is an optimisation, never a
+    // correctness assumption.
+    let already = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    let mut request = client.get(url);
+    if already > 0 {
+        request = request.header("Range", format!("bytes={already}-"));
+    }
+
+    let mut resp = request.send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() && resp.status().as_u16() != 206 {
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let total = resp.content_length();
-    let mut file = File::create(dest).map_err(|e| e.to_string())?;
+    let resuming = resp.status().as_u16() == 206;
+    if resuming {
+        progress(
+            app,
+            "download",
+            "Resuming download…",
+            format!("Continuing from {}", friendly_bytes(already)),
+            span.download_start(),
+        );
+    }
+
+    // 206 means the body continues from `already`; anything else is the whole
+    // file again and the partial has to go.
+    let total = resp
+        .content_length()
+        .map(|n| n + if resuming { already } else { 0 });
+    let mut file = if resuming {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dest)
+            .map_err(|e| e.to_string())?
+    } else {
+        File::create(dest).map_err(|e| e.to_string())?
+    };
     let mut buf = [0u8; 64 * 1024];
-    let mut done: u64 = 0;
-    let mut last_emit = 0u64;
+    let mut done: u64 = if resuming { already } else { 0 };
+    let mut last_emit = done;
 
     loop {
         let n = resp.read(&mut buf).map_err(|e| e.to_string())?;

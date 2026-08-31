@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Which Undead Legacy build every launcher installs. Fetched at install time,",
+    "so bumping the mod reaches everyone without reissuing the app.",
+    "",
+    "7 Days to Die refuses connections between a client and server on different",
+    "mod builds, so this file and the server MUST be updated together:",
+    "  1. update the server  (server/setup-ul-server.sh reads this same file)",
+    "  2. commit this file   (clients pick it up on their next install)",
+    "Doing it the other way round sends players to a build the server isn't on.",
+    "",
+    "sha          = the GitLab commit to install. 40 hex chars.",
+    "mirrorSha256 = SHA-256 of the copy on the private mirror, if it holds one.",
+    "               Omit it and the mirror simply isn't offered for that part.",
+    "               It cannot describe a GitLab download: those archives are",
+    "               generated per request and are not byte-reproducible.",
+    "",
+    "Anything malformed here is ignored and the launcher falls back to the pins",
+    "compiled into the app, so a bad edit degrades rather than breaks."
+  ],
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-30",
+  "channels": {
+    "experimental": {
+      "ulVersion": "2.7.19",
+      "gameBranch": "v2.6",
+      "parts": [
+        {
+          "label": "part 1 of 2",
+          "group": "subquakesgroup",
+          "repo": "UndeadLegacyExperimentalPart1",
+          "sha": "131fd4ea4e89fd0402082cd7e4851f1836091908",
+          "mirrorSha256": "34021b9555e42d97cb9d1383b09fa437821caba9dc848bfe446be96150fb01c0"
+        },
+        {
+          "label": "part 2 of 2",
+          "group": "subquakesgroup",
+          "repo": "UndeadLegacyExperimentalPart2",
+          "sha": "e890a4ead20da776a0554f7b098f2e613ebaccc1",
+          "mirrorSha256": "2881ea7bc9735c3cdfbff1edba7615d111f80e5bbbc0a402a904bc8e5df1f82d"
+        }
+      ]
+    },
+    "stable": {
+      "ulVersion": "2.6.17",
+      "gameBranch": "alpha20.7",
+      "parts": [
+        {
+          "label": "the mod files",
+          "group": "Subquake",
+          "repo": "UndeadLegacyStable",
+          "sha": "093b0380f76f3e5ad000d285f7136cbd63eabf3b"
+        }
+      ]
+    }
+  }
+}
