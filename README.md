@@ -15,6 +15,7 @@ Built for people who just want to play (and for friends who should never have to
 | Clones a full second game (~14GB+) | **In-place** install into the Steam folder |
 | Shell / BepInEx launch left to the user | **Play** injects Doorstop + **`-noeac`** for you |
 | Sequoia “app is damaged” | Release zip includes **Open Me First** quarantine fix |
+| Self-update restart loop | No self-updater; only the *build list* is fetched at run time |
 | Leaves a ~30 GB cloned `Alpha20/` behind | Installs in place; nothing to clean up |
 
 ## Release channels
@@ -33,6 +34,13 @@ supports, so "no beta selected" is a failure state rather than a safe default.
 Both are pinned to exact commits. 7 Days to Die refuses connections between a
 client and server on different mod builds, so every player must install the same
 one — see `server/README.md`.
+
+The pins live in [`pinned-build.json`](./pinned-build.json), fetched at install
+time. Bumping the mod is a one-line commit that every launcher picks up on its
+next install — no reissued app, no reinstall. The server setup script reads the
+same file, so the two cannot drift apart. If the file is unreachable or
+malformed the launcher falls back to the pins compiled into the binary, so an
+offline friend still gets a working install.
 
 ## Features (v0.3)
 

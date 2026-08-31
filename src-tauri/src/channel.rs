@@ -84,19 +84,33 @@ pub struct Part {
     pub sha: &'static str,
 }
 
-impl Part {
-    pub fn url(&self) -> String {
-        format!(
-            "https://gitlab.com/{}/{}/-/archive/{}/{}-{}.zip",
-            self.group, self.repo, self.sha, self.repo, self.sha
-        )
-    }
+/// Private mirror on the tailnet.
+///
+/// Holds byte-identical copies of the pinned archives and, unlike GitLab,
+/// honours `Range` — so an interrupted download resumes instead of restarting
+/// from zero on a multi-gigabyte file. It is a CGNAT address that only resolves
+/// inside the tailnet; anyone else simply fails to connect and falls through to
+/// GitLab, which stays the source of truth.
+///
+/// Serving it privately rather than publishing it is deliberate: the Undead
+/// Legacy licence limits redistribution to private use.
+const TAILNET_MIRROR: &str = "http://100.69.65.14:8088";
 
-    /// Short form for logs and the UI.
-    pub fn build_id(&self) -> &str {
-        &self.sha[..8]
-    }
-}
+/// SHA-256 of the copies stored on the private mirror.
+///
+/// Deliberately *not* a property of the pinned commit. GitLab generates its
+/// archives on demand and the result is not byte-reproducible — two downloads
+/// of this very commit differed by 261 KB in the zip wrapper alone, while the
+/// contents were identical. So a digest can only describe one stored file,
+/// which is exactly what the mirror holds. A GitLab download is trusted
+/// through the commit SHA embedded in its URL instead.
+const EXPERIMENTAL_MIRROR_DIGESTS: &[&str] = &[
+    "34021b9555e42d97cb9d1383b09fa437821caba9dc848bfe446be96150fb01c0",
+    "2881ea7bc9735c3cdfbff1edba7615d111f80e5bbbc0a402a904bc8e5df1f82d",
+];
+
+/// Stable is not mirrored yet — it always comes from GitLab.
+const STABLE_MIRROR_DIGESTS: &[&str] = &[];
 
 const STABLE_PARTS: &[Part] = &[Part {
     label: "the mod files",
@@ -166,6 +180,38 @@ impl Channel {
             Channel::Stable => "alpha20.7",
             Channel::Experimental => "v2.6",
         }
+    }
+
+    /// Where the private mirror keeps this channel's archives. Filenames match
+    /// the local cache, so the two are trivially interchangeable.
+    pub fn mirror_url(self, index: usize) -> String {
+        format!("{TAILNET_MIRROR}/{}-{index}.zip", self.cache_stem())
+    }
+
+    /// The pins compiled into this binary, used when the published manifest
+    /// can't be reached or doesn't parse. Always available, so a friend who is
+    /// offline still gets a working install rather than an error.
+    pub fn built_in_pins(self) -> Vec<crate::pin::PinnedPart> {
+        self.parts()
+            .iter()
+            .enumerate()
+            .map(|(index, p)| crate::pin::PinnedPart {
+                label: p.label.to_string(),
+                group: p.group.to_string(),
+                repo: p.repo.to_string(),
+                sha: p.sha.to_string(),
+                mirror_sha256: self.mirror_digest(index).map(str::to_string),
+            })
+            .collect()
+    }
+
+    /// Expected digest of the mirror's copy, if we have one on record.
+    pub fn mirror_digest(self, index: usize) -> Option<&'static str> {
+        let digests = match self {
+            Channel::Stable => STABLE_MIRROR_DIGESTS,
+            Channel::Experimental => EXPERIMENTAL_MIRROR_DIGESTS,
+        };
+        digests.get(index).copied()
     }
 
     /// Cache subfolder, so channels never reuse each other's downloads.
@@ -372,13 +418,6 @@ mod tests {
                     "{} sha is not hex",
                     part.label
                 );
-                let url = part.url();
-                assert!(url.contains(part.sha), "{} url dropped the sha", part.label);
-                assert!(
-                    !url.contains("/main/") && !url.contains("-main.zip"),
-                    "{} still points at a moving branch: {url}",
-                    part.label
-                );
             }
         }
     }
@@ -387,7 +426,73 @@ mod tests {
     fn parts_within_a_channel_are_distinct() {
         let parts = Channel::Experimental.parts();
         assert_ne!(parts[0].repo, parts[1].repo);
-        assert_ne!(parts[0].url(), parts[1].url());
+        assert_ne!(parts[0].sha, parts[1].sha);
+    }
+
+    /// The compiled-in fallback must reproduce exactly what the static table
+    /// describes, including which parts are mirrored.
+    #[test]
+    fn built_in_pins_mirror_the_static_table() {
+        for ch in [Channel::Stable, Channel::Experimental] {
+            let pins = ch.built_in_pins();
+            assert_eq!(pins.len(), ch.parts().len());
+            for (index, pin) in pins.iter().enumerate() {
+                assert_eq!(pin.sha, ch.parts()[index].sha);
+                assert_eq!(pin.mirror_sha256.as_deref(), ch.mirror_digest(index));
+                assert!(pin.url().contains(&pin.sha), "resolved url dropped the pin");
+                assert!(
+                    !pin.url().contains("-main.zip"),
+                    "resolved url points at a moving branch"
+                );
+            }
+        }
+    }
+
+    /// The mirror serves files under the same names the local cache uses, so a
+    /// file can be copied between them by hand without renaming.
+    #[test]
+    fn mirror_filenames_match_the_local_cache() {
+        for ch in [Channel::Stable, Channel::Experimental] {
+            for index in 0..ch.parts().len() {
+                let expected = format!("{}-{index}.zip", ch.cache_stem());
+                assert!(
+                    ch.mirror_url(index).ends_with(&expected),
+                    "{} should end with {expected}",
+                    ch.mirror_url(index)
+                );
+            }
+        }
+    }
+
+    /// A recorded mirror digest must be a well-formed SHA-256. A channel with
+    /// no digests simply isn't mirrored and always uses GitLab.
+    #[test]
+    fn mirror_digests_are_well_formed() {
+        for ch in [Channel::Stable, Channel::Experimental] {
+            for index in 0..ch.parts().len() {
+                let Some(d) = ch.mirror_digest(index) else {
+                    continue;
+                };
+                assert_eq!(d.len(), 64, "{ch:?} part {index} digest length");
+                assert!(d.chars().all(|c| c.is_ascii_hexdigit()));
+                assert_eq!(d, d.to_ascii_lowercase(), "digest must be lowercase hex");
+            }
+        }
+    }
+
+    /// Every mirrored part needs its own digest — two parts sharing one would
+    /// mean a copy/paste slip that lets the wrong file verify.
+    #[test]
+    fn each_mirrored_part_has_a_distinct_digest() {
+        let digests: Vec<_> = (0..Channel::Experimental.parts().len())
+            .filter_map(|i| Channel::Experimental.mirror_digest(i))
+            .collect();
+        assert_eq!(
+            digests.len(),
+            2,
+            "both experimental parts should be mirrored"
+        );
+        assert_ne!(digests[0], digests[1]);
     }
 
     #[test]

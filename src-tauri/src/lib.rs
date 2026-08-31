@@ -1,5 +1,6 @@
 mod channel;
 mod paths;
+mod pin;
 mod progress;
 mod steam;
 mod ul;

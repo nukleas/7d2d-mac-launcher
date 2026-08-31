@@ -14,8 +14,12 @@
 # every player's launcher installs exactly what the server runs.
 set -euo pipefail
 
+# Fallbacks, used only if the published build list can't be read. Clients read
+# that same list, so editing it in one place keeps server and players in step.
 UL_PART1_SHA="131fd4ea4e89fd0402082cd7e4851f1836091908"
 UL_PART2_SHA="e890a4ead20da776a0554f7b098f2e613ebaccc1"
+
+PIN_MANIFEST_URL="https://raw.githubusercontent.com/nukleas/7d2d-mac-launcher/main/pinned-build.json"
 
 SERVER_USER="sdtd"
 SERVER_DIR="/srv/7dtd"
@@ -27,6 +31,29 @@ die() { printf '\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo $0)"
 [[ "$(uname -m)" == "x86_64" ]] || die "7DTD dedicated server is x86_64 only; this box is $(uname -m)"
+
+log "Resolving which Undead Legacy build to install"
+# Read the same published list the launchers use. If it can't be fetched or
+# parsed we keep the fallbacks above — a server that installs a slightly older
+# pinned build is recoverable; one that installs an unknown build is not.
+if MANIFEST="$(curl -fsSL --max-time 20 "$PIN_MANIFEST_URL" 2>/dev/null)"; then
+  RESOLVED="$(printf '%s' "$MANIFEST" | python3 -c '
+import json, re, sys
+try:
+    parts = json.load(sys.stdin)["channels"]["experimental"]["parts"]
+    shas = [p["sha"] for p in parts]
+except Exception:
+    sys.exit(1)
+if len(shas) != 2 or not all(re.fullmatch(r"[0-9a-f]{40}", s) for s in shas):
+    sys.exit(1)
+print(" ".join(shas))
+' 2>/dev/null)" && [[ -n "$RESOLVED" ]] && read -r UL_PART1_SHA UL_PART2_SHA <<<"$RESOLVED" \
+    && echo "  using published build list" \
+    || echo "  published list unusable — keeping built-in pins"
+else
+  echo "  could not fetch published list — keeping built-in pins"
+fi
+echo "  part1 ${UL_PART1_SHA:0:8}   part2 ${UL_PART2_SHA:0:8}"
 
 log "Installing dependencies"
 dpkg --add-architecture i386
@@ -75,7 +102,11 @@ fetch_part() {
   curl -fL --retry 10 --retry-all-errors --retry-delay 5 --max-time 7200 -o "$zip" "$url" \
     || die "download of part $part failed"
 
-  unzip -q "$zip" -d "$STAGING/part${part}"
+  # Part 2 trips unzip's zip-bomb heuristic ("invalid zip file with overlapped
+  # components") and is refused outright, despite being a valid archive —
+  # verified with the check disabled and with Python's zipfile. Without this the
+  # script fails on a perfectly good download.
+  UNZIP_DISABLE_ZIPBOMB_DETECTION=TRUE unzip -q "$zip" -d "$STAGING/part${part}"
   # Archives wrap everything in "<repo>-<sha>/". Merge the *contents* of that
   # wrapper: both parts populate Mods/UndeadLegacy/Resources, so replacing the
   # directory instead of merging would silently delete the other part's files.

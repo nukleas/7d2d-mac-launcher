@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Runtime build list** (`pinned-build.json`): which Undead Legacy build to
+  install is fetched at install time instead of compiled in, so a mod bump
+  reaches every player without reissuing the app. Falls back to the built-in
+  pins when unreachable or malformed. `server/setup-ul-server.sh` reads the same
+  file, so server and clients cannot drift apart.
+- **Private mirror fallback**: archives can also be served from a tailnet host.
+  GitLab stays the primary because it is faster off that LAN; the mirror is the
+  retry, because it honours `Range` and GitLab does not — an interrupted
+  multi-gigabyte download resumes instead of restarting.
+- Downloads resume where a previous attempt stopped, when the source allows it.
+- Mirror downloads are checksum-verified before install.
+
+### Fixes
+- `unzip` refuses UL part 2 as a suspected zip bomb ("overlapped components")
+  despite it being a valid archive; the server script now disables that check.
+- Clearer message when the *downloaded package* is incomplete — it named a
+  missing file without saying it meant the download, not the game folder.
+
+### Notes
+- GitLab archives are not byte-reproducible: two downloads of the same commit
+  differed by 261 KB of zip metadata with identical contents. Checksums can
+  therefore only describe a stored copy, not "the archive for commit X".
+
 ## 0.3.0
 
 Undead Legacy 2.7 shipped for game v2.6 on 2026-08-17, ending the four-year
