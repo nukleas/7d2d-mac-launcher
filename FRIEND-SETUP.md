@@ -1,6 +1,6 @@
 # Undead Legacy on Mac — simple setup
 
-**You need:** a Mac (Apple Silicon), Steam, and *7 Days to Die*.  
+**You need:** a Mac (Intel or Apple Silicon), Steam, and *7 Days to Die*.  
 **You don’t need:** Terminal, coding, or shell scripts.
 
 ---
@@ -65,6 +65,39 @@ compare.
 5. Click **Play Undead Legacy**
 
 **Always use this app’s Play button** — not Steam’s Play — so the mod loads correctly.
+
+---
+
+## ⚠️ Don’t launch the game any other way
+
+Three things look like the right way to start the game. On a Mac, **all three
+load the game without the mod’s engine**, and all three fail the same confusing way:
+
+| Don’t use | Why |
+|-----------|-----|
+| **`7dLauncher.app`** (in the game folder) | The game’s own launcher. Starts the game *without* injecting the mod loader. |
+| **Steam’s Play button** | Same problem. |
+| **`run_bepinex.sh`** (in the game folder) | Undead Legacy ships it, but on Mac it looks for a file called `libdoorstop_x64.dylib` that isn’t in 2.7 — it just stops. |
+
+Only this app’s **Play** button sets up the mod loader correctly.
+
+### How to tell this is what went wrong
+
+The game **starts normally**, gets to the loading screen, then throws errors. In
+the log you’ll see:
+
+```
+Could not load file or assembly 'BepInEx, Version=5.4.4.0'
+Could not load file or assembly '0Harmony, Version=2.9.0.0'
+```
+
+and complaints that a `.ulm` file can’t be found under
+`Data/Bundles/Standalone/Mods/UndeadLegacy/Resources/`.
+
+**The file is not missing.** It’s in `Mods/UndeadLegacy/Resources/`, exactly
+where it belongs. The mod redirects the game to look there, and that redirect is
+part of the engine that never loaded. Nothing is wrong with your files — don’t
+start moving folders around. Quit the game and press **Play** in this app.
 
 ---
 
@@ -179,6 +212,10 @@ and enter:
 The mod cannot load with EAC on. Nothing else is needed to make the mod
 load — Windows picks up `winhttp.dll` automatically, so there are no environment
 variables or scripts to set.
+
+*Unlike on Mac, it doesn't matter how you start the game on Windows* — Steam,
+the desktop shortcut and `7dLauncher.exe` all work, because Windows loads
+`winhttp.dll` by itself. The Mac warning above doesn't apply to you.
 
 **6) Play**
 

@@ -417,26 +417,26 @@ pub fn install_undead_legacy(
         }
     }
 
-    // Mods live at the game root only. We launch with the game root as the
-    // working directory and doorstop_config.ini resolves `baseDir = Mods/`
-    // from there, so a second copy inside 7DaysToDie.app is never read — it
-    // just doubled a multi-gigabyte folder. Clear out any left by older
-    // installs.
-    let stale_app_mods = game.join("7DaysToDie.app/Mods");
-    if stale_app_mods.is_dir() {
-        progress(
-            app,
-            "copy",
-            "Tidying up…",
-            "Removing a duplicate mods folder from earlier installs",
-            97,
-        );
-        match fs::remove_dir_all(&stale_app_mods) {
-            Ok(()) => steps.push("Removed duplicate Mods copy inside 7DaysToDie.app".into()),
-            Err(e) => steps.push(format!(
-                "Note: could not remove the duplicate Mods copy: {e}"
-            )),
-        }
+    // Mods has to be reachable from *two* places, because two subsystems
+    // resolve it differently:
+    //
+    //   mod loader     <game>/Mods                       — code and config
+    //   asset bundles  <game>/7DaysToDie.app/Mods        — the .ulm bundles
+    //
+    // The bundle loader builds its path from the app bundle's Data directory
+    // ("Data/Bundles/Standalone/../../../Mods"), which on macOS lands *inside*
+    // 7DaysToDie.app rather than at the game root — the executable lives in
+    // Contents/MacOS and Data is inside the bundle, so the same arithmetic that
+    // works on Windows and Linux ends up somewhere else here. Without this the
+    // game runs and the mod loads, but every .ulm fails with "Parent folder not
+    // found" — over a thousand of them, and no music.
+    //
+    // A symlink rather than a copy: this is a multi-gigabyte folder, and a copy
+    // both doubles it and can drift out of sync with the real one.
+    if let Err(e) = link_mods_into_app_bundle(app, &game) {
+        steps.push(format!("Note: {e}"));
+    } else {
+        steps.push("Linked Mods into 7DaysToDie.app (needed for sounds and UI)".into());
     }
 
     let runner = game.join("run_bepinex.sh");
@@ -703,6 +703,13 @@ fn spawn_modded_game(
     // Critical: without -noeac the game refuses UndeadLegacy.dll → red XUi/texture spam.
     cmd.arg("-noeac");
     cmd.arg("-nogs");
+
+    // Ask the game for its own structured log. Capturing stdout is not enough:
+    // it collects Unity/dyld noise but none of the game's timestamped INF/WRN/ERR
+    // lines, which are the ones that say what actually went wrong. The game's
+    // own launcher passes this, so without it we are harder to support than the
+    // launcher we tell people not to use.
+    cmd.arg(format!("-logfile={}", game_log_path(game).display()));
     if config.is_file() {
         cmd.arg(format!("-configfile={}", config.display()));
     }
@@ -756,7 +763,7 @@ fn spawn_modded_game(
     );
 
     Ok(format!(
-        "{} -noeac -nogs (pid {}, log {})",
+        "{} -noeac -nogs (pid {}, logs {})",
         executable.display(),
         pid,
         log_path.display()
@@ -904,6 +911,60 @@ fn sources_for(channel: Channel, part: &PinnedPart, index: usize) -> Vec<String>
         sources.push(channel.mirror_url(index));
     }
     sources
+}
+
+/// Where the game writes its structured log.
+///
+/// A fixed name beside the launcher's own stdout capture, so "send me the log"
+/// has one answer rather than depending on how the game was started.
+fn game_log_path(game: &Path) -> PathBuf {
+    game.join("ul_game_log.txt")
+}
+
+/// Make `<game>/7DaysToDie.app/Mods` resolve to `<game>/Mods`.
+///
+/// The asset-bundle loader looks inside the app bundle; the mod loader looks at
+/// the game root. A relative symlink satisfies both from one copy of the files.
+///
+/// Replaces whatever is there — including the multi-gigabyte duplicate that
+/// older versions of this launcher copied in, which cost 3.4 GB and could drift
+/// out of sync with the real Mods folder.
+fn link_mods_into_app_bundle(app: &Progress, game: &Path) -> Result<(), String> {
+    let target = game.join("7DaysToDie.app/Mods");
+    if !game.join("7DaysToDie.app").is_dir() {
+        return Err("no 7DaysToDie.app to link Mods into".to_string());
+    }
+
+    // symlink_metadata: a broken symlink still needs replacing, and is_dir()
+    // would follow the link and miss it.
+    if let Ok(meta) = fs::symlink_metadata(&target) {
+        progress(
+            app,
+            "copy",
+            "Finishing Mac setup…",
+            "Linking mods into the game app",
+            97,
+        );
+        let removed = if meta.is_dir() && !meta.file_type().is_symlink() {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+        removed.map_err(|e| format!("could not replace {}: {e}", target.display()))?;
+    }
+
+    // Relative, so the link survives the game folder being moved or copied.
+    std::os::unix::fs::symlink("../Mods", &target)
+        .map_err(|e| format!("could not link Mods into 7DaysToDie.app: {e}"))?;
+
+    // Prove it resolves rather than trusting that the symlink call succeeded.
+    if !target.join("UndeadLegacy").is_dir() {
+        return Err(format!(
+            "linked {} but it does not resolve to the mod files",
+            target.display()
+        ));
+    }
+    Ok(())
 }
 
 /// SHA-256 of a file, streamed so a multi-gigabyte archive never lands in RAM.
@@ -1349,6 +1410,74 @@ mod tests {
             assert_eq!(span.download_pct(-1.0), span.download_pct(0.0));
             assert_eq!(span.download_pct(9.0), span.download_pct(1.0));
         }
+    }
+
+    fn fake_game(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ul-link-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("7DaysToDie.app/Contents/MacOS")).unwrap();
+        // The bundle loader's path walks through these, so they have to exist
+        // for it to resolve at all — as they do in a real install.
+        fs::create_dir_all(dir.join("7DaysToDie.app/Data/Bundles/Standalone")).unwrap();
+        fs::create_dir_all(dir.join("Mods/UndeadLegacy/Resources")).unwrap();
+        fs::write(
+            dir.join("Mods/UndeadLegacy/Resources/Subquake_Sounds.ulm"),
+            b"x",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// The asset-bundle loader resolves through 7DaysToDie.app; without this
+    /// link every .ulm fails with "Parent folder not found" and the game has no
+    /// sound, even though the mod itself loads fine.
+    #[test]
+    fn links_mods_into_the_app_bundle() {
+        let game = fake_game("fresh");
+        link_mods_into_app_bundle(&Progress::silent(), &game).expect("should link");
+
+        let link = game.join("7DaysToDie.app/Mods");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // The exact path the bundle loader builds must land on a real file.
+        assert!(game
+            .join("7DaysToDie.app/Contents/../Data/Bundles/Standalone/../../../Mods/UndeadLegacy/Resources/Subquake_Sounds.ulm")
+            .exists());
+        let _ = fs::remove_dir_all(&game);
+    }
+
+    /// 0.2.0 copied a multi-gigabyte duplicate in here. Installing over one must
+    /// replace it with the link rather than fail or leave it stale.
+    #[test]
+    fn replaces_a_real_directory_left_by_older_versions() {
+        let game = fake_game("legacy-copy");
+        let stale = game.join("7DaysToDie.app/Mods");
+        fs::create_dir_all(stale.join("UndeadLegacy")).unwrap();
+        fs::write(stale.join("UndeadLegacy/stale.txt"), b"old").unwrap();
+
+        link_mods_into_app_bundle(&Progress::silent(), &game).expect("should replace");
+
+        assert!(fs::symlink_metadata(&stale)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(
+            !stale.join("UndeadLegacy/stale.txt").exists(),
+            "stale copy survived"
+        );
+        let _ = fs::remove_dir_all(&game);
+    }
+
+    /// Re-running an install must not fail on the link it made last time.
+    #[test]
+    fn linking_twice_is_safe() {
+        let game = fake_game("idempotent");
+        link_mods_into_app_bundle(&Progress::silent(), &game).expect("first");
+        link_mods_into_app_bundle(&Progress::silent(), &game).expect("second");
+        assert!(game.join("7DaysToDie.app/Mods/UndeadLegacy").is_dir());
+        let _ = fs::remove_dir_all(&game);
     }
 
     #[test]
