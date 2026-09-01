@@ -16,7 +16,7 @@ set -euo pipefail
 
 # Fallbacks, used only if the published build list can't be read. Clients read
 # that same list, so editing it in one place keeps server and players in step.
-UL_PART1_SHA="131fd4ea4e89fd0402082cd7e4851f1836091908"
+UL_PART1_SHA="4ea04e433d3b423fb3bfae326f7da7d14e95ab0b"
 UL_PART2_SHA="e890a4ead20da776a0554f7b098f2e613ebaccc1"
 
 PIN_MANIFEST_URL="https://raw.githubusercontent.com/nukleas/7d2d-mac-launcher/main/pinned-build.json"

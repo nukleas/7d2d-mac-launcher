@@ -105,7 +105,7 @@ const TAILNET_MIRROR: &str = "http://100.69.65.14:8088";
 /// which is exactly what the mirror holds. A GitLab download is trusted
 /// through the commit SHA embedded in its URL instead.
 const EXPERIMENTAL_MIRROR_DIGESTS: &[&str] = &[
-    "34021b9555e42d97cb9d1383b09fa437821caba9dc848bfe446be96150fb01c0",
+    "ec6ff3663bb43528bafc588b5877f4b60bba4b407bada5bcac95cd003d4788a8",
     "2881ea7bc9735c3cdfbff1edba7615d111f80e5bbbc0a402a904bc8e5df1f82d",
 ];
 
@@ -125,8 +125,8 @@ const EXPERIMENTAL_PARTS: &[Part] = &[
         label: "part 1 of 2",
         group: "subquakesgroup",
         repo: "UndeadLegacyExperimentalPart1",
-        // UL 2.7.19, 2026-08-29.
-        sha: "131fd4ea4e89fd0402082cd7e4851f1836091908",
+        // UL 2.7.22, 2026-08-31.
+        sha: "4ea04e433d3b423fb3bfae326f7da7d14e95ab0b",
     },
     Part {
         label: "part 2 of 2",

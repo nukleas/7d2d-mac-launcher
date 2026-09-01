@@ -71,15 +71,30 @@ differed by 261 KB — zip metadata varies between generations, contents identic
 ## Detecting what's installed
 
 **`ModInfo.xml` lies.** It reads `<Version value="2.7.01"/>` in 2.7.19 *and*
-2.7.22. It is not bumped per release and cannot be used for version detection.
+2.7.22 — verified against both commits. It is not bumped per release.
 
-What does work:
+But the game still logs the correct version:
 
-- **Hash `Mods/UndeadLegacy/UndeadLegacy.dll`** and map it to a known build.
-  Deterministic, one small file, no archive involved.
-- **Write your own marker** at install time recording the commit SHA you
-  installed. This is what we do — it's the only thing that survives regardless of
-  what upstream changes.
+```
+INF [MODS]     Loaded Mod: UndeadLegacy (2.7.22)
+```
+
+because the real version lives in the **assembly metadata of
+`Mods/UndeadLegacy/UndeadLegacy.dll`**, not in `ModInfo.xml`. On a 2.7.22
+install:
+
+```
+$ strings -a Mods/UndeadLegacy/UndeadLegacy.dll | grep -oE '^2\.7\.[0-9]{2}$'
+2.7.22
+```
+
+So version detection is straightforward, just not where you'd expect:
+
+- **Read the version out of `UndeadLegacy.dll`** — one small file, no archive,
+  no lookup table. Best option for "which version do you have".
+- **Hash that dll** if you also want to detect a tampered or partial install.
+- **Write your own marker** recording the commit SHA you installed, if you want
+  something that survives whatever upstream does to its metadata next.
 
 ---
 
