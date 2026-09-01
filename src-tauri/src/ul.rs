@@ -220,7 +220,16 @@ pub fn install_undead_legacy(
             part.build_id()
         ));
 
-        let zip_path = cache.join(format!("{}-{index}.zip", channel.cache_stem()));
+        // The build id is part of the filename on purpose. Keyed only by
+        // channel and index, a perfectly valid archive from the *previous* pin
+        // matches every reuse check — same size range, parses fine — and gets
+        // installed while the log claims the new build. The install succeeds,
+        // and the player still cannot join, with nothing to explain why.
+        let zip_path = cache.join(format!(
+            "{}-{index}-{}.zip",
+            channel.cache_stem(),
+            part.build_id()
+        ));
         let mut from_mirror = false;
 
         // GitLab ignores Range headers, so a dropped transfer restarts from
@@ -487,9 +496,7 @@ pub fn install_undead_legacy(
     // downloaded archives. Keeping them until this point means a failure
     // part-way through doesn't cost another multi-gigabyte download.
     let _ = fs::remove_dir_all(&staging);
-    for index in 0..parts.len() {
-        let _ = fs::remove_file(cache.join(format!("{}-{index}.zip", channel.cache_stem())));
-    }
+    prune_cached_archives(&cache, channel, parts);
 
     progress(app, "finish", "All set!", "You can press Play now", 100);
 
@@ -911,6 +918,34 @@ fn sources_for(channel: Channel, part: &PinnedPart, index: usize) -> Vec<String>
         sources.push(channel.mirror_url(index));
     }
     sources
+}
+
+/// Drop cached archives that are not part of the build just installed.
+///
+/// The current build's archives are deliberately *kept*. Undead Legacy ships
+/// every few days and usually only part 1 changes, so holding them means the
+/// next update downloads what actually moved rather than the whole ~6.9 GB
+/// package again. Anything from an older pin is dead weight and goes.
+fn prune_cached_archives(cache: &Path, channel: Channel, parts: &[PinnedPart]) {
+    let keep: Vec<String> = parts
+        .iter()
+        .enumerate()
+        .map(|(index, p)| format!("{}-{index}-{}.zip", channel.cache_stem(), p.build_id()))
+        .collect();
+
+    let Ok(entries) = fs::read_dir(cache) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Only ever touch this channel's own archives.
+        if !name.starts_with(channel.cache_stem()) || !name.ends_with(".zip") {
+            continue;
+        }
+        if !keep.contains(&name) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Where the game writes its structured log.
@@ -1478,6 +1513,63 @@ mod tests {
         link_mods_into_app_bundle(&Progress::silent(), &game).expect("second");
         assert!(game.join("7DaysToDie.app/Mods/UndeadLegacy").is_dir());
         let _ = fs::remove_dir_all(&game);
+    }
+
+    fn pin(sha: &str) -> PinnedPart {
+        PinnedPart {
+            label: "part 1 of 2".into(),
+            group: "g".into(),
+            repo: "r".into(),
+            sha: sha.into(),
+            mirror_sha256: None,
+        }
+    }
+
+    /// The bug this guards: cached as "<channel>-<index>.zip", an archive from
+    /// the *previous* pin passes every reuse check — right size, parses fine —
+    /// so a version bump silently installs the old build and the player still
+    /// cannot join the server.
+    #[test]
+    fn cache_names_are_distinct_per_build() {
+        let old = format!("ul-experimental-0-{}.zip", pin("131fd4ea4e89").build_id());
+        let new = format!("ul-experimental-0-{}.zip", pin("4ea04e433d3b").build_id());
+        assert_ne!(
+            old, new,
+            "a bump must not reuse the previous build's cache file"
+        );
+    }
+
+    #[test]
+    fn pruning_keeps_the_current_build_and_drops_the_rest() {
+        let cache = std::env::temp_dir().join(format!("ul-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+        fs::create_dir_all(&cache).unwrap();
+
+        let parts = vec![pin("4ea04e433d3b423fb3bfae326f7da7d14e95ab0b")];
+        let current = format!("ul-experimental-0-{}.zip", parts[0].build_id());
+        for name in [
+            current.as_str(),
+            "ul-experimental-0-131fd4ea.zip", // an older pin
+            "ul-stable-0-093b0380.zip",       // another channel
+            "unrelated.txt",
+        ] {
+            fs::write(cache.join(name), b"x").unwrap();
+        }
+
+        prune_cached_archives(&cache, Channel::Experimental, &parts);
+
+        assert!(
+            cache.join(&current).exists(),
+            "current build should be kept"
+        );
+        assert!(
+            !cache.join("ul-experimental-0-131fd4ea.zip").exists(),
+            "stale build should go"
+        );
+        // Never touch another channel's archives, or unrelated files.
+        assert!(cache.join("ul-stable-0-093b0380.zip").exists());
+        assert!(cache.join("unrelated.txt").exists());
+        let _ = fs::remove_dir_all(&cache);
     }
 
     #[test]

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+- **A version bump could silently install the previous build.** Cached archives
+  were named `<channel>-<index>.zip` with no build in the name, and reuse only
+  checked "is this a valid zip of a plausible size". After a pin bump, the
+  perfectly valid archive from the *old* build matched every check and was
+  installed while the log reported the new one — a successful install that still
+  cannot join the server, with nothing explaining why. Cache files are now keyed
+  by build id.
+
+### Changed
+- The current build's archives are **kept** after a successful install rather
+  than deleted, and older pins pruned. Undead Legacy usually only moves part 1,
+  so the next update downloads ~3.3 GB instead of the whole ~6.9 GB package. The
+  cost is ~6.9 GB resident in `~/Library/Caches/7d2d-mac-launcher`, which is safe
+  to delete at any time.
+
 ## 0.4.0
 
 ### Fixed
