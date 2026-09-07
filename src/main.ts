@@ -16,6 +16,9 @@ type GameInfo = {
   hasDoorstop: boolean;
   hasModsFolder: boolean;
   modReady: boolean;
+  /// Which build the last install landed. modReady says files are there;
+  /// this says which — the only thing the server checks before letting you in.
+  installedBuild: string | null;
   notes: string[];
 };
 
@@ -135,7 +138,10 @@ function setChips(info: GameInfo, freeGb: number | null) {
     });
   }
   if (info.modReady) {
-    chips.push({ text: "Mod ready to play", cls: "ok" });
+    chips.push({
+      text: info.installedBuild ? `Build ${info.installedBuild}` : "Mod ready to play",
+      cls: "ok",
+    });
   } else if (info.hasBepinex && !info.hasDoorstop) {
     chips.push({ text: "Mod incomplete — reinstall", cls: "warn" });
   } else if (info.hasBepinex || info.hasRunBepinex) {
@@ -314,7 +320,9 @@ async function refreshGame() {
       setReady(
         "ok",
         "Ready to play!",
-        "Everything looks installed. Press Play (use this app every time — not Steam’s Play button).",
+        info.installedBuild
+          ? `Build ${info.installedBuild} is installed. Press Play (use this app every time — not Steam’s Play button).`
+          : "Everything looks installed. Press Play (use this app every time — not Steam’s Play button).",
       );
       if (launch) launch.disabled = false;
       if (install) install.disabled = false;
@@ -372,9 +380,13 @@ async function installUl() {
     });
     showToast(result.ok, result.message);
     if (result.ok) {
+      // Zero bytes means the backend found the pinned build already installed
+      // and stopped. A real install can never report zero: reusing a cached
+      // archive still counts its size, so the two cases stay distinguishable.
+      const alreadyCurrent = result.downloadBytes === 0;
       applyProgress({
         stage: "finish",
-        title: "All set!",
+        title: alreadyCurrent ? "Already up to date" : "All set!",
         detail: "Press Play when you’re ready",
         percent: 100,
         bytesDone: result.downloadBytes,

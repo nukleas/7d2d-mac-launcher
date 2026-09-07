@@ -1,6 +1,7 @@
 //! In-place Undead Legacy install for macOS (no full game clone).
 
 use crate::channel::{Channel, Doorstop};
+use crate::installed;
 use crate::paths::expand_user_path;
 use crate::pin::{self, PinnedPart};
 use crate::progress::{progress, progress_bytes, Progress};
@@ -128,6 +129,59 @@ pub fn install_undead_legacy(
         };
     }
 
+    // Which build to install is resolved at run time, so a mod bump reaches
+    // everyone without reissuing the app. Falls back to the compiled-in pins.
+    //
+    // Resolved before anything else is touched, because it decides whether
+    // there is any work to do at all.
+    let (parts, pin_source) = pin::resolve(channel);
+    steps.push(format!("Build list: {}", pin_source.describe()));
+    progress(
+        app,
+        "check",
+        "Checking which build to install…",
+        pin_source.describe(),
+        7,
+    );
+    let parts: &[PinnedPart] = &parts;
+
+    // "Nothing to do" is a real outcome, and the common one: this launcher is
+    // how you start the game, so it gets opened far more often than the mod
+    // actually moves. Without this check every open offers to re-fetch several
+    // gigabytes to rebuild a folder that is already exactly what was asked for.
+    //
+    // `force` is also the repair path, so it has to skip this even when the
+    // marker looks perfect — that is precisely when someone is repairing.
+    if !force {
+        if let Some(recorded) = installed::read(&game) {
+            if recorded.matches(channel, parts) && install_is_intact(&game) {
+                let build_ids = recorded.describe();
+                steps.push(format!(
+                    "Already on build {build_ids} — nothing to download"
+                ));
+                progress(
+                    app,
+                    "finish",
+                    "Already up to date",
+                    format!("Build {build_ids} is installed"),
+                    100,
+                );
+                return InstallResult {
+                    ok: true,
+                    message: format!(
+                        "You are already on the pinned build ({build_ids}) — press Play.\n\nNothing needed downloading. To rewrite the files anyway, tick “Reinstall from scratch” and press Install again."
+                    ),
+                    game_path: game.to_string_lossy().into_owned(),
+                    steps,
+                    // Zero is how the UI recognises this path. A real install
+                    // cannot report it: reusing a cached archive still counts
+                    // its size towards the total.
+                    download_bytes: Some(0),
+                };
+            }
+        }
+    }
+
     if let Some(free) = free_space_bytes(&game) {
         let free_gb = free as f64 / 1_073_741_824.0;
         steps.push(format!("Free space: {free_gb:.1} GB"));
@@ -161,9 +215,7 @@ pub fn install_undead_legacy(
         }
     }
 
-    let cache = dirs::cache_dir()
-        .unwrap_or_else(|| expand_user_path("~/Library/Caches"))
-        .join("7d2d-mac-launcher");
+    let cache = archive_cache_dir();
     if let Err(e) = fs::create_dir_all(&cache) {
         return fail(
             app,
@@ -172,10 +224,11 @@ pub fn install_undead_legacy(
             format!("Could not create cache folder: {e}"),
         );
     }
+    migrate_legacy_cache(&cache);
 
     // Every part is unpacked into one staging tree, so the copy phase below
     // sees a single merged package no matter how many archives it arrived in.
-    let staging = cache.join(format!("{}-staging", channel.cache_stem()));
+    let staging = staging_dir(channel);
     let _ = fs::remove_dir_all(&staging);
     if let Err(e) = fs::create_dir_all(&staging) {
         return fail(
@@ -186,18 +239,6 @@ pub fn install_undead_legacy(
         );
     }
 
-    // Which build to install is resolved at run time, so a mod bump reaches
-    // everyone without reissuing the app. Falls back to the compiled-in pins.
-    let (parts, pin_source) = pin::resolve(channel);
-    steps.push(format!("Build list: {}", pin_source.describe()));
-    progress(
-        app,
-        "check",
-        "Checking which build to install…",
-        pin_source.describe(),
-        9,
-    );
-    let parts: &[PinnedPart] = &parts;
     let mut download_total: u64 = 0;
 
     for (index, part) in parts.iter().enumerate() {
@@ -370,6 +411,12 @@ pub fn install_undead_legacy(
     let source_root = staging.clone();
     steps.push(format!("Package ready: {}", source_root.display()));
 
+    // From the first replaced folder until the last one lands, the game holds a
+    // mix of two builds. A marker naming either of them would survive a failure
+    // here and claim a build that is not what is on disk, so drop it now and
+    // write the new one only once everything below has been verified.
+    installed::clear(&game);
+
     // Note: Unity Doorstop uses "doorstop_*" (not "doorstep_*").
     // Missing doorstop_libs → dyld abort: libdoorstop_x64.dylib not found.
     // required=true → install fails if the package omits them (never silent skip).
@@ -497,6 +544,17 @@ pub fn install_undead_legacy(
     // part-way through doesn't cost another multi-gigabyte download.
     let _ = fs::remove_dir_all(&staging);
     prune_cached_archives(&cache, channel, parts);
+
+    // Written last, and only here: everything above has proved the files are
+    // present and launchable, so this is the first moment the claim is true.
+    // A marker we fail to write costs a redundant reinstall, which is the old
+    // behaviour — never a wrong "you are up to date".
+    match installed::write(&game, channel, parts) {
+        Ok(()) => steps.push("Recorded the installed build".into()),
+        Err(e) => steps.push(format!(
+            "Note: could not record the installed build ({e}) — the next Install will reinstall from scratch"
+        )),
+    }
 
     progress(app, "finish", "All set!", "You can press Play now", 100);
 
@@ -918,6 +976,97 @@ fn sources_for(channel: Channel, part: &PinnedPart, index: usize) -> Vec<String>
         sources.push(channel.mirror_url(index));
     }
     sources
+}
+
+/// Everything an install proves before it reports success.
+///
+/// The marker records which build was copied in; it cannot know the files
+/// survived. People delete folders, and Steam's "verify integrity of game
+/// files" rewrites the app bundle — which takes the Mods symlink with it and
+/// leaves a mod that loads but has no sounds. So skipping the work requires the
+/// same evidence finishing the work requires.
+fn install_is_intact(game: &Path) -> bool {
+    game.join("BepInEx").is_dir()
+        && find_doorstop(game).is_some()
+        && game.join("Mods").is_dir()
+        && game.join("run_bepinex.sh").is_file()
+        && game.join("7DaysToDie.app/Mods/UndeadLegacy").is_dir()
+}
+
+/// Everything the launcher keeps between runs.
+fn support_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| expand_user_path("~/Library/Application Support"))
+        .join("7d2d-mac-launcher")
+}
+
+/// Where downloaded archives wait between attempts.
+///
+/// Deliberately not `~/Library/Caches`: macOS counts that as purgeable space
+/// and reclaims it under disk pressure. On a nearly-full drive — which is
+/// exactly the drive holding a 30 GB game plus a 7 GB mod — that silently
+/// deletes archives which took an hour to fetch, and the next install starts
+/// over from zero. Application Support is not swept.
+fn archive_cache_dir() -> PathBuf {
+    support_dir().join("archives")
+}
+
+/// Where the parts are merged into one tree before being copied into the game.
+///
+/// Also out of `~/Library/Caches`, for a sharper reason: staging is live for
+/// the length of an install, and a purge partway through does not cost a
+/// re-download, it corrupts the package being assembled.
+fn staging_dir(channel: Channel) -> PathBuf {
+    support_dir().join(format!("{}-staging", channel.cache_stem()))
+}
+
+/// Move archives out of the old `~/Library/Caches` location, once.
+///
+/// They are re-downloadable, but that is the entire cost being avoided here:
+/// deleting a 3 GB part someone already holds, as part of a fix about not
+/// deleting parts people already hold, would be a poor trade. Forward-only —
+/// the old folder is removed, so this never does anything again.
+///
+/// Archives from before builds were part of the filename come across too. They
+/// can never be reused, because the name they are looked up under now carries a
+/// build id, and `prune_cached_archives` clears them after the next install.
+fn migrate_legacy_cache(dest: &Path) {
+    let legacy = dirs::cache_dir()
+        .unwrap_or_else(|| expand_user_path("~/Library/Caches"))
+        .join("7d2d-mac-launcher");
+    reclaim_archives_from(&legacy, dest);
+}
+
+/// Move every archive in `legacy` to `dest`, then remove `legacy`.
+fn reclaim_archives_from(legacy: &Path, dest: &Path) {
+    let Ok(entries) = fs::read_dir(legacy) else {
+        return;
+    };
+
+    let mut moved_everything = true;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if Path::new(&name).extension().is_none_or(|ext| ext != "zip") {
+            continue;
+        }
+        let target = dest.join(&name);
+        // A file already at the destination is the one that will be used; the
+        // stray copy behind us is the one to drop.
+        if target.exists() {
+            let _ = fs::remove_file(entry.path());
+            continue;
+        }
+        if fs::rename(entry.path(), &target).is_err() {
+            moved_everything = false;
+        }
+    }
+
+    // Only reclaim the old folder once nothing of value is left in it. A failed
+    // rename means a volume boundary or a permission problem, and deleting the
+    // archive we just failed to rescue would defeat the point.
+    if moved_everything {
+        let _ = fs::remove_dir_all(legacy);
+    }
 }
 
 /// Drop cached archives that are not part of the build just installed.
@@ -1539,6 +1688,123 @@ mod tests {
         );
     }
 
+    /// A complete install: every file `install_is_intact` insists on.
+    fn installed_game(name: &str) -> PathBuf {
+        let game = fake_game(name);
+        fs::create_dir_all(game.join("BepInEx")).unwrap();
+        fs::create_dir_all(game.join("doorstop_libs")).unwrap();
+        fs::write(game.join("doorstop_libs/libdoorstop.dylib"), b"x").unwrap();
+        fs::write(game.join("run_bepinex.sh"), b"#!/bin/sh\n").unwrap();
+        link_mods_into_app_bundle(&Progress::silent(), &game).unwrap();
+        game
+    }
+
+    #[test]
+    fn a_complete_install_reads_as_intact() {
+        let game = installed_game("intact");
+        assert!(install_is_intact(&game));
+        let _ = fs::remove_dir_all(&game);
+    }
+
+    /// Steam's "verify integrity of game files" rewrites 7DaysToDie.app and
+    /// takes the Mods symlink with it. Everything else still looks installed,
+    /// and the mod loads — silently without sounds or UI. Skipping the install
+    /// on the strength of the marker alone would leave it that way.
+    #[test]
+    fn a_missing_mods_link_is_not_intact() {
+        let game = installed_game("relinked");
+        fs::remove_file(game.join("7DaysToDie.app/Mods")).unwrap();
+        assert!(!install_is_intact(&game));
+        let _ = fs::remove_dir_all(&game);
+    }
+
+    #[test]
+    fn each_missing_piece_is_not_intact() {
+        for (name, victim) in [
+            ("no-bepinex", "BepInEx"),
+            ("no-doorstop", "doorstop_libs"),
+            ("no-mods", "Mods"),
+            ("no-runner", "run_bepinex.sh"),
+        ] {
+            let game = installed_game(name);
+            let target = game.join(victim);
+            if target.is_dir() {
+                fs::remove_dir_all(&target).unwrap();
+            } else {
+                fs::remove_file(&target).unwrap();
+            }
+            assert!(
+                !install_is_intact(&game),
+                "{victim} missing should not pass"
+            );
+            let _ = fs::remove_dir_all(&game);
+        }
+    }
+
+    /// The reason for the move: macOS reclaims `~/Library/Caches` under disk
+    /// pressure, and these files cost an hour to fetch.
+    #[test]
+    fn archives_are_kept_outside_the_purgeable_cache() {
+        let archives = archive_cache_dir();
+        let purgeable = dirs::cache_dir().unwrap();
+        assert!(
+            !archives.starts_with(&purgeable),
+            "archives must not live in {}",
+            purgeable.display()
+        );
+        assert!(
+            !staging_dir(Channel::Experimental).starts_with(&purgeable),
+            "staging must not live in the purgeable cache either"
+        );
+    }
+
+    /// Someone mid-upgrade may hold gigabytes in the old location. Deleting
+    /// those to fix a bug about deleting those would be a poor trade.
+    #[test]
+    fn the_move_off_the_purgeable_cache_keeps_the_archives() {
+        let root = std::env::temp_dir().join(format!("ul-migrate-{}", std::process::id()));
+        let (legacy, dest) = (root.join("legacy"), root.join("archives"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(legacy.join("ul-experimental-staging/BepInEx")).unwrap();
+        for name in ["ul-experimental-0-4ea04e43.zip", "ul-stable-0-093b0380.zip"] {
+            fs::write(legacy.join(name), b"archive").unwrap();
+        }
+
+        reclaim_archives_from(&legacy, &dest);
+
+        assert!(dest.join("ul-experimental-0-4ea04e43.zip").is_file());
+        assert!(dest.join("ul-stable-0-093b0380.zip").is_file());
+        // The old folder, staging tree and all, is space handed back.
+        assert!(!legacy.exists(), "the old cache folder should be reclaimed");
+
+        // Nothing to move is the steady state, and must stay silent.
+        reclaim_archives_from(&legacy, &dest);
+        assert!(dest.join("ul-experimental-0-4ea04e43.zip").is_file());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A part already downloaded to the new location is the one in use; the
+    /// stray behind it is the copy to drop, not the copy to trust.
+    #[test]
+    fn the_move_never_overwrites_a_newer_archive() {
+        let root = std::env::temp_dir().join(format!("ul-migrate-dup-{}", std::process::id()));
+        let (legacy, dest) = (root.join("legacy"), root.join("archives"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let name = "ul-experimental-0-4ea04e43.zip";
+        fs::write(legacy.join(name), b"old").unwrap();
+        fs::write(dest.join(name), b"current").unwrap();
+
+        reclaim_archives_from(&legacy, &dest);
+
+        assert_eq!(fs::read(dest.join(name)).unwrap(), b"current");
+        assert!(!legacy.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn pruning_keeps_the_current_build_and_drops_the_rest() {
         let cache = std::env::temp_dir().join(format!("ul-prune-{}", std::process::id()));
@@ -1636,11 +1902,31 @@ mod tests {
         assert_eq!(generation, Doorstop::V4);
 
         // Staging must not be left behind.
-        let staging = dirs::cache_dir()
-            .unwrap()
-            .join("7d2d-mac-launcher")
-            .join(format!("{}-staging", Channel::Experimental.cache_stem()));
-        assert!(!staging.exists(), "staging tree left in the cache");
+        let staging = staging_dir(Channel::Experimental);
+        assert!(!staging.exists(), "staging tree left behind");
+
+        // What just landed has to be written down, or the next install repeats
+        // all of the above for nothing.
+        let recorded = installed::read(&game).expect("install recorded no build");
+        let (parts, _) = pin::resolve(Channel::Experimental);
+        assert!(recorded.matches(Channel::Experimental, &parts));
+        assert!(install_is_intact(&game));
+
+        // And read back: a second install, unforced, must do no work at all.
+        let again = install_undead_legacy(
+            &Progress::silent(),
+            Channel::Experimental,
+            Some(game.to_string_lossy().into_owned()),
+            false,
+        );
+        assert!(again.ok, "second install failed: {}", again.message);
+        assert_eq!(
+            again.download_bytes,
+            Some(0),
+            "an up-to-date install downloaded something: {:#?}",
+            again.steps
+        );
+        assert!(game.join("Mods/UndeadLegacy/UndeadLegacy.dll").is_file());
 
         let _ = fs::remove_dir_all(&game);
     }

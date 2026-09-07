@@ -126,6 +126,7 @@ Open **7D2D Mac Launcher** from Applications → **Play**.
 | Download keeps dropping | Press **Install** again — finished parts are kept, so it resumes where it got to |
 | “Not enough free space” | It tells you how much you need — clear that much, then **Install** |
 | Install incomplete | **Install** again (repair) |
+| “Already up to date” | Nothing to do — press **Play**. Tick **Reinstall from scratch** if you want the files rewritten anyway |
 | App is damaged | Use **Open Me First**, or Privacy & Security → Open Anyway |
 | Red errors / broken menu | You used Steam Play — quit and use this app’s **Play** |
 
