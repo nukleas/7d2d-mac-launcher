@@ -50,6 +50,8 @@ offline friend still gets a working install.
 - Multi-part download → single staging tree → **rename** into the game folder  
 - Retries when a large download drops, and reuses parts already fetched —
   GitLab ignores `Range`, so an interrupted transfer otherwise restarts from zero  
+- Records the installed build, so pressing **Install** when you already have the
+  pinned one does nothing instead of re-fetching 6.9 GB  
 - **Play** launches with the right Doorstop generation + Easy Anti-Cheat off  
 - Friend-friendly UI + `FRIEND-SETUP.md`  
 

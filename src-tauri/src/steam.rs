@@ -3,6 +3,7 @@
 use crate::channel::{
     channel_for, line_from_beta_key, unity_says_alpha20, Channel, Doorstop, GameLine,
 };
+use crate::installed;
 use crate::paths::{default_steam_game_path, default_steam_manifest_path, expand_user_path};
 use serde::Serialize;
 use std::fs;
@@ -30,6 +31,10 @@ pub struct GameInfo {
     pub has_mods_folder: bool,
     /// True when BepInEx + doorstop + launch script + Mods are all present.
     pub mod_ready: bool,
+    /// Which Undead Legacy build the last install landed, if it recorded one.
+    /// `mod_ready` says files are there; only this says *which* — and that is
+    /// the question a server asks before it lets someone in.
+    pub installed_build: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -94,12 +99,19 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
     // Fully playable: BepInEx + doorstop dylibs + Mods. Shell script optional (launcher injects itself).
     let mod_ready = has_bepinex && has_doorstop && has_mods_folder;
 
+    let installed_build = installed::read(&game_path).map(|b| b.describe());
+
     if has_bepinex && !has_doorstop {
         notes.push(
             "Mod files are incomplete (missing doorstop). Click Install again to repair.".into(),
         );
     } else if mod_ready {
-        notes.push("Undead Legacy looks fully installed and ready to play.".into());
+        match &installed_build {
+            Some(build) => notes.push(format!(
+                "Undead Legacy build {build} is installed and ready to play."
+            )),
+            None => notes.push("Undead Legacy looks fully installed and ready to play.".into()),
+        }
     } else if has_bepinex {
         notes.push("BepInEx is present in the game folder.".into());
     }
@@ -119,6 +131,7 @@ pub fn detect_game(optional_path: Option<String>) -> GameInfo {
         has_doorstop,
         has_mods_folder,
         mod_ready,
+        installed_build,
         notes,
     }
 }

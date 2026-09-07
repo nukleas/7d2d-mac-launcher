@@ -1,4 +1,5 @@
 mod channel;
+mod installed;
 mod paths;
 mod pin;
 mod progress;
@@ -46,6 +47,7 @@ async fn get_game_info(path: Option<String>) -> GameInfo {
             has_doorstop: false,
             has_mods_folder: false,
             mod_ready: false,
+            installed_build: None,
             notes: vec![format!("Background task failed: {e}")],
         })
 }

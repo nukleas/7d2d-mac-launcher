@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.5.0
+
+### Fixed
+- **Every Install re-downloaded the whole 6.9 GB package, even when the pinned
+  build was already installed.** Nothing recorded *which* build was in the game
+  folder: `detect_game` only checked that `BepInEx`, `doorstop_libs` and `Mods`
+  existed, which says a mod is there but never says which one — and which one is
+  the only thing 7 Days to Die weighs when it decides whether you may join a
+  server. With no answer, being certain meant redoing the entire install.
+
+  An install now records what it landed in `ul_installed_build.json` in the game
+  folder, and the next one stops early when that build matches the resolved pin.
+  Opening the launcher to press Play no longer offers to re-fetch several
+  gigabytes to rebuild a folder that is already exactly right.
+
+  The marker is not taken on trust on its own: the short-circuit re-checks every
+  file the install proves before it reports success, including the `Mods` symlink
+  inside `7DaysToDie.app`. Steam's "verify integrity of game files" rewrites that
+  bundle and takes the symlink with it, which leaves a mod that loads and has no
+  sound. It is cleared before the copy phase and written only after the final
+  check, so an install that fails partway through never leaves a marker claiming
+  a build the folder does not hold.
+
+- **macOS was deleting the downloaded archives.** They lived in
+  `~/Library/Caches`, which the system counts as purgeable and reclaims under
+  disk pressure — on the nearly-full drive that holds a 30 GB game plus a 7 GB
+  mod, exactly the drive in question. Several gigabytes that took an hour to
+  fetch would quietly vanish and the next install would start from zero. The
+  archives and the staging tree now live in
+  `~/Library/Application Support/7d2d-mac-launcher`, which is not swept. A purge
+  of staging was the sharper problem of the two: it does not cost a re-download,
+  it corrupts the package mid-assembly.
+
+  Archives already in the old location are moved across on the next install
+  rather than abandoned, and the old folder is reclaimed.
+
+### Changed
+- The build list is now resolved before the free-space check, because it decides
+  whether there is any work to do at all.
+- "Install anyway if the version check fails" is now "Reinstall from scratch" —
+  it skips the up-to-date check too, and is the repair path.
+- The UI names the installed build (`Build 4ea04e43 + e890a4ea`) instead of
+  "Mod ready to play", so it can be compared against the server at a glance.
+
 ## 0.4.1
 
 ### Fixed
@@ -15,8 +59,8 @@
 - The current build's archives are **kept** after a successful install rather
   than deleted, and older pins pruned. Undead Legacy usually only moves part 1,
   so the next update downloads ~3.3 GB instead of the whole ~6.9 GB package. The
-  cost is ~6.9 GB resident in `~/Library/Caches/7d2d-mac-launcher`, which is safe
-  to delete at any time.
+  cost is ~6.9 GB resident in the launcher's cache folder (moved out of
+  `~/Library/Caches` in 0.5.0 — see above), which is safe to delete at any time.
 
 ## 0.4.0
 
