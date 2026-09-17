@@ -104,10 +104,11 @@ const TAILNET_MIRROR: &str = "http://100.69.65.14:8088";
 /// contents were identical. So a digest can only describe one stored file,
 /// which is exactly what the mirror holds. A GitLab download is trusted
 /// through the commit SHA embedded in its URL instead.
-const EXPERIMENTAL_MIRROR_DIGESTS: &[&str] = &[
-    "ec6ff3663bb43528bafc588b5877f4b60bba4b407bada5bcac95cd003d4788a8",
-    "2881ea7bc9735c3cdfbff1edba7615d111f80e5bbbc0a402a904bc8e5df1f82d",
-];
+///
+/// Empty until the mirror is refreshed for the current pin. Stale digests
+/// would offer the previous build and let it verify, which is the silent
+/// mismatch the digest exists to catch.
+const EXPERIMENTAL_MIRROR_DIGESTS: &[&str] = &[];
 
 /// Stable is not mirrored yet — it always comes from GitLab.
 const STABLE_MIRROR_DIGESTS: &[&str] = &[];
@@ -125,15 +126,15 @@ const EXPERIMENTAL_PARTS: &[Part] = &[
         label: "part 1 of 2",
         group: "subquakesgroup",
         repo: "UndeadLegacyExperimentalPart1",
-        // UL 2.7.22, 2026-08-31.
-        sha: "4ea04e433d3b423fb3bfae326f7da7d14e95ab0b",
+        // UL 2.7.33, 2026-09-14. Official catalog: ul.subquake.com/download.
+        sha: "41e60c392e3068fc8ad238f9395f47b124109671",
     },
     Part {
         label: "part 2 of 2",
         group: "subquakesgroup",
         repo: "UndeadLegacyExperimentalPart2",
-        // Bulk assets; updated less often than part 1.
-        sha: "e890a4ead20da776a0554f7b098f2e613ebaccc1",
+        // Bulk assets; last moved at 2.7.27. 2.7.33 is a part-1 patch on top.
+        sha: "39e80938f70ba253aedb2c71c70d6ecf6886a7b3",
     },
 ];
 
@@ -481,18 +482,29 @@ mod tests {
     }
 
     /// Every mirrored part needs its own digest — two parts sharing one would
-    /// mean a copy/paste slip that lets the wrong file verify.
+    /// mean a copy/paste slip that lets the wrong file verify. An empty list
+    /// means the channel is not mirrored and always uses GitLab.
     #[test]
     fn each_mirrored_part_has_a_distinct_digest() {
-        let digests: Vec<_> = (0..Channel::Experimental.parts().len())
-            .filter_map(|i| Channel::Experimental.mirror_digest(i))
-            .collect();
-        assert_eq!(
-            digests.len(),
-            2,
-            "both experimental parts should be mirrored"
-        );
-        assert_ne!(digests[0], digests[1]);
+        for ch in [Channel::Stable, Channel::Experimental] {
+            let digests: Vec<_> = (0..ch.parts().len())
+                .filter_map(|i| ch.mirror_digest(i))
+                .collect();
+            if digests.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                digests.len(),
+                ch.parts().len(),
+                "{ch:?} mirrors some parts but not all"
+            );
+            let unique: std::collections::HashSet<_> = digests.iter().copied().collect();
+            assert_eq!(
+                unique.len(),
+                digests.len(),
+                "{ch:?} digest reused across parts"
+            );
+        }
     }
 
     #[test]
