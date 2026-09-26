@@ -126,14 +126,14 @@ const EXPERIMENTAL_PARTS: &[Part] = &[
         label: "part 1 of 2",
         group: "subquakesgroup",
         repo: "UndeadLegacyExperimentalPart1",
-        // UL 2.7.33, 2026-09-14. Official catalog: ul.subquake.com/download.
-        sha: "41e60c392e3068fc8ad238f9395f47b124109671",
+        // UL 2.7.36, 2026-09-25. Official catalog: ul.subquake.com/download.
+        sha: "bf085dc55fa8b51853b47ec1a88ec4532b6301d5",
     },
     Part {
         label: "part 2 of 2",
         group: "subquakesgroup",
         repo: "UndeadLegacyExperimentalPart2",
-        // Bulk assets; last moved at 2.7.27. 2.7.33 is a part-1 patch on top.
+        // Bulk assets; last moved at 2.7.27. 2.7.36 is a part-1 patch on top.
         sha: "39e80938f70ba253aedb2c71c70d6ecf6886a7b3",
     },
 ];

@@ -19,17 +19,17 @@
     "compiled into the app, so a bad edit degrades rather than breaks."
   ],
   "schemaVersion": 1,
-  "updatedAt": "2026-09-16",
+  "updatedAt": "2026-09-26",
   "channels": {
     "experimental": {
-      "ulVersion": "2.7.33",
+      "ulVersion": "2.7.36",
       "gameBranch": "v2.6",
       "parts": [
         {
           "label": "part 1 of 2",
           "group": "subquakesgroup",
           "repo": "UndeadLegacyExperimentalPart1",
-          "sha": "41e60c392e3068fc8ad238f9395f47b124109671"
+          "sha": "bf085dc55fa8b51853b47ec1a88ec4532b6301d5"
         },
         {
           "label": "part 2 of 2",
